@@ -1,0 +1,19 @@
+{
+  "msg": "",
+  "datas": {
+    "xtdqsj": "2026-10-12 16:00:00",
+    "wdhdList": [
+      {
+        "HD_WID": "9077433c420649399417b52eae7d5b50",
+        "YY_WID": "fixture-booking-id",
+        "WID": "fixture-record-id",
+        "JZMC": "【一“剧”钟情】2026-2027学年秋学期南京保利大剧院优惠购票福利",
+        "FBZT": "1",
+        "SFDK": "0",
+        "SFWY": "0"
+      }
+    ]
+  },
+  "debugException": null,
+  "code": 0
+}

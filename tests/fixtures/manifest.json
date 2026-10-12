@@ -1,0 +1,85 @@
+{
+  "date": "2026-10-12",
+  "timezone": "Asia/Shanghai",
+  "fixtures": {
+    "activities.json": {
+      "kind": "derived",
+      "source": "本轮只读 common-activity.$props.item；依前次真实响应结构拆分三集合",
+      "notes": "xtdqsj 为固定模拟时间；YY_WID 替换为占位值；不是原始 HTTP body"
+    },
+    "my-activities.json": {
+      "kind": "derived",
+      "source": "前次 booking-verification.json 字段与目标匹配记录",
+      "notes": "最小重建，预约 ID/记录 ID 替换；固定模拟时间"
+    },
+    "detail.json": {
+      "kind": "synthetic",
+      "source": "当前 hdxq.js 的 datas.hdxq 结构＋本轮卡片信息",
+      "notes": "结构重建，未取得本轮真实详情响应"
+    },
+    "booking-success.json": {
+      "kind": "observed",
+      "source": "前次 booking-response.json",
+      "notes": "HTTP 200 成功业务响应原样提取"
+    },
+    "booking-captcha-error.json": {
+      "kind": "observed",
+      "source": "前次 direct-booking-result.json",
+      "notes": "HTTP 200 验证码错误原样提取，具体成因未确认"
+    },
+    "captcha.svg": {
+      "kind": "synthetic",
+      "source": "独立生成的 TEST 占位图",
+      "notes": "无真实验证码；测试时编码为完整 data URI"
+    },
+    "list.html": {
+      "kind": "observed",
+      "source": "本轮实际列表 DOM 的前两张卡片",
+      "notes": "仅保留卡片；新增 HTML 外壳；DOM 本身不含 Vue 实例引用"
+    },
+    "detail.html": {
+      "kind": "synthetic",
+      "source": "当前 hdxqIndexPage.html 模板",
+      "notes": "最小结构重建，不是渲染快照"
+    }
+  },
+  "sourceSnapshots": [
+    {
+      "name": "hdyy.js.txt",
+      "sha256": "ccf69bc2a52b5e9a72b7c9f344bde3acd593d8cb99f0a0ae9700f1662b9010a7",
+      "capture": "earlier-roundtrip"
+    },
+    {
+      "name": "activity.js.txt",
+      "sha256": "f49366b2c748f72f7cfd88e7c6e021570e4c258fcf9cb88a66229b597d55bdde",
+      "capture": "earlier-roundtrip"
+    },
+    {
+      "name": "hdxqIndexPage.html",
+      "sha256": "8db75ba2ed9f5c6ae45e002acd2969234d25222f4c82b37f64ec83d515abdcf2",
+      "capture": "current-read-only"
+    },
+    {
+      "name": "hdyyBS.js",
+      "sha256": "5d6728de4dbea82781a19176a2d7a23c0897751fee1e21205473a60f97e7cdb5",
+      "capture": "current-read-only"
+    },
+    {
+      "name": "activityIndexPage.html",
+      "sha256": "bd4015b55e19136ada542d9570476b84db530f04278b2c23dc83eeedd49099bd",
+      "capture": "current-read-only"
+    },
+    {
+      "name": "hdyyIndexPage.html",
+      "sha256": "e6df24584785cf7517de901ca65fe166752b3445ae30dcdd8f2b3b2c5b4d5141",
+      "capture": "current-read-only"
+    },
+    {
+      "name": "hdxq.js",
+      "sha256": "f898951a21b0fa3f6d273c025541231da98127c910a9297bafe10c1c0a27adcc",
+      "capture": "current-read-only"
+    }
+  ],
+  "liveReadResult": "本轮后续 POST 查询连接错误/超时；不作为成功响应样例",
+  "publication": "此目录不包含用户凭据、学生名单、真实个人预约 ID 或学校源码全文"
+}

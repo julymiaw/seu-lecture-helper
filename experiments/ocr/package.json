@@ -1,0 +1,14 @@
+{
+  "name": "seu-lecture-ocr-evaluation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node benchmark.mjs"
+  },
+  "dependencies": {
+    "@tesseract.js-data/eng": "1.0.0",
+    "ddddocr-node": "2.3.0",
+    "onnxruntime-web": "1.30.0",
+    "tesseract.js": "7.0.0"
+  }
+}

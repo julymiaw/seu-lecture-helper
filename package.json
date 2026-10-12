@@ -1,0 +1,28 @@
+{
+  "name": "seu-lecture-helper",
+  "version": "0.3.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run test:e2e",
+    "prepare:ocr-tests": "node scripts/prepare-ocr-test-assets.mjs",
+    "test:e2e": "npm run build && npm run prepare:ocr-tests && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.0",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "jsdom": "^27.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "onnxruntime-web": "1.30.0"
+  }
+}

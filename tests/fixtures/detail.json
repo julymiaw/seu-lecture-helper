@@ -1,0 +1,26 @@
+{
+  "msg": "",
+  "datas": {
+    "xtdqsj": "2026-10-12 16:00:00",
+    "hdxq": {
+      "FBZT": "1",
+      "HDJSSJ": "2026-10-18 00:00:00",
+      "HDZRS": "5000",
+      "JZDD": "南京保利大剧院",
+      "JZMC": "【一“剧”钟情】2026-2027学年秋学期南京保利大剧院优惠购票福利",
+      "JZSJ": "2026-10-17 00:00:00",
+      "JZXL_DISPLAY": "“SEU咖啡间”系列沙龙活动",
+      "SFDK": "0",
+      "SFYXQXYY": 1,
+      "WID": "9077433c420649399417b52eae7d5b50",
+      "YYJSSJ": "2026-10-13 00:00:00",
+      "YYKSSJ": "2026-10-05 20:00:00",
+      "YYRS": 626,
+      "YY_WID": "fixture-booking-id",
+      "ZJR": "南京保利大剧院"
+    },
+    "wycspzList": []
+  },
+  "debugException": null,
+  "code": 0
+}
