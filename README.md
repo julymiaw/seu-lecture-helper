@@ -6,7 +6,7 @@ v0.3.3 增加“立即检查”，放在“停止监测”左边；检查间隔�
 
 ## 安装与使用
 
-1. 在 Tampermonkey 等管理器中创建脚本，复制 [dist/seu-lecture-helper.user.js](dist/seu-lecture-helper.user.js) 全文并保存。
+1. 安装 Tampermonkey 等管理器后，打开[脚本安装链接](https://raw.githubusercontent.com/julymiaw/seu-lecture-helper/main/dist/seu-lecture-helper.user.js)。若未触发安装，可创建脚本并复制 [dist/seu-lecture-helper.user.js](dist/seu-lecture-helper.user.js) 全文保存。
 2. 登录当前 [研究生讲座系统](https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*default/index.do#/hdyy)。脚本只匹配这一 HTTPS 应用。
 3. 点击活动原按钮旁的“预约助手”。人数已满时默认选中余位监测并禁用定时预约；其他活动默认定时预约。确认选项后点击“开始等待”“立即预约”或“开始监测”；打开弹窗本身不会取验证码或提交。
 4. 定时预约可选择“自动识别”或“手动输入”，倒计时期间即可切换，选择会保存在本浏览器。余位监测独立使用自动识别，默认禁用手动输入；模型加载、识别或验证码校验异常后，临时切回手动并开放选项，不修改定时预约偏好。
