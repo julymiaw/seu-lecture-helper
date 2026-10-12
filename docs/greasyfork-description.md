@@ -4,6 +4,8 @@
 
 安装后直接在浏览器中使用，无需本地服务、额外软件或 API 密钥。
 
+[项目源码](https://github.com/julymiaw/seu-lecture-helper) · [问题反馈](https://github.com/julymiaw/seu-lecture-helper/issues) · [完整使用说明](https://github.com/julymiaw/seu-lecture-helper#readme)
+
 ## 主要功能
 
 - **定时预约**：提前选择活动并启动倒计时，到开放时间自动获取验证码，识别后提交。
@@ -13,6 +15,8 @@
 - **收起与恢复**：收起弹窗后继续等待或监测，点击活动旁的助手按钮即可恢复同一任务。
 
 ## 使用方法
+
+在本页面安装脚本，或通过 [GitHub 安装链接](https://raw.githubusercontent.com/julymiaw/seu-lecture-helper/main/dist/seu-lecture-helper.user.js)安装。两处提供的是同一个脚本，保留一份启用即可。
 
 安装脚本后，登录[东南大学研究生讲座预约系统](https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*default/index.do#/hdyy)，刷新页面，点击活动旁的“预约助手”。
 
@@ -56,4 +60,8 @@
 
 这是非官方辅助工具，请遵守学校预约和参与活动的要求。
 
-源码与问题反馈：[GitHub 仓库](https://github.com/julymiaw/seu-lecture-helper)。
+## 源码与反馈
+
+项目采用 MIT 许可证，源码、构建文件、测试和接口说明均在 [GitHub 仓库](https://github.com/julymiaw/seu-lecture-helper)公开。
+
+遇到问题可在 [Issues](https://github.com/julymiaw/seu-lecture-helper/issues)反馈，请注明脚本版本、浏览器与用户脚本管理器、操作步骤和错误提示。截图请遮盖个人信息，不要提供密码、Cookie 或完整登录请求。
