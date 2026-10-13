@@ -9,7 +9,7 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';badFirst?:boolean;fullOnRejection?:boolean;rejectFull?:boolean;mode?:'manual'|'ocr';full?:boolean}={}) {
+async function setup(page:Page, options:{notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';badFirst?:boolean;fullOnRejection?:boolean;rejectFull?:boolean;full?:boolean}={}) {
   const initialTime=Date.now();
   let booked=false,writes=0,captchaCalls=0,assetCalls=0;
   const codes:string[]=[];
@@ -38,7 +38,9 @@ async function setup(page:Page, options:{future?:boolean;blocked?:boolean;reject
     else if(name==='vcode.do') {captchaCalls++;result={code:0,datas:options.badFirst&&captchaCalls===1?blank:image};}
     else if(name==='addReservation.do') {
       writes++; codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
-      if(options.rejectFull&&writes===1) {full=true;result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};}
+      if(options.notOpenOnce&&writes===1) result={code:-1,datas:null,msg:'尚未开放预约'};
+      else if(options.rejectFull&&writes===1) {full=true;result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};}
+      else if(full)result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
       else if(options.rejectCode&&(writes===1||options.rejectCode==='three'&&writes<=3)){if(options.fullOnRejection&&writes>=2)full=true;result={code:-1,datas:null,msg:'验证码错误，请重试'};}
       else {booked=true;result={code:0,datas:1};}
     } else if(name==='queryMyActivityList.do') result={code:0,datas:{wdhdList:booked?[{HD_WID:raw.datas.hdlbList[0].WID,YY_WID:'fixture-id',FBZT:'1'}]:[]}};
@@ -95,7 +97,7 @@ test('unavailable model keeps the image editable, with manual submission and no 
 });
 test('retry stops when capacity becomes full; no ongoing monitoring',async({page})=>{
   await page.clock.install();const state=await setup(page,{rejectCode:'three',fullOnRejection:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('人数已满',{timeout:20000});const count=state.captchaCalls();await page.clock.fastForward(120000);expect(state.captchaCalls()).toBe(count);expect(state.writes()).toBe(2);
+  await expect(page.getByRole('status')).toContainText('人数已满',{timeout:20000});const count=state.captchaCalls();await page.clock.fastForward(120000);expect(state.captchaCalls()).toBe(count);expect(state.writes()).toBe(3);
 });
 test('compact dialog fits a narrow viewport and reopen retains the answer',async({page},testInfo)=>{
   await page.clock.install();const state=await setup(page,{future:true});await page.setViewportSize({width:375,height:700});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
@@ -103,4 +105,9 @@ test('compact dialog fits a narrow viewport and reopen retains the answer',async
   await page.getByRole('button',{name:'收起',exact:true}).click();await page.getByRole('button',{name:'预约中'}).first().click();await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253');
   const fits=await page.locator('#seu-lecture-helper-dialog').locator('dialog').evaluate(el=>el.scrollHeight<=el.clientHeight && el.scrollWidth<=el.clientWidth);expect(fits).toBe(true);
   await page.screenshot({path:testInfo.outputPath('prepared-mobile.png')});expect(state.writes()).toBe(0);
+});
+
+test('not-open boundary refreshes captcha before submitting again',async({page})=>{
+  const state=await setup(page,{notOpenOnce:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
 });

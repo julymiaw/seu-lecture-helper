@@ -7,7 +7,6 @@ export interface State {
   image?: string; code?: string; leadSeconds?: number; armed?: boolean;
   ocrStatus?: 'loading' | 'ready' | 'failed'; ocrMessage?: string;
 }
-export function knownCount(item: Activity) {return item.countKnown && Number.isInteger(item.count) && item.count >= 0 && Number.isInteger(item.capacity) && item.capacity > 0 && item.count <= item.capacity;}
 export function fullCapacity(state: State) {const a=state.activity; return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);}
 export function controls(state: State, now=Date.now()) {
   const a=state.activity, active=Boolean(a && !a.reserved && !a.cancelled && now+(state.offset??0)<a.endsAt && !fullCapacity(state));
@@ -92,7 +91,7 @@ export class Reservation {
     const remaining=this.state.activity!.startsAt-this.now()-this.offset;
     this.set(this.state.phase,this.state.message,{remaining:Math.max(0,remaining)});
     if(!this.captured && remaining<=(this.state.leadSeconds??30)*1000){this.captured=true;void this.loadCaptcha();}
-    if(remaining<=0){if(controls(this.state,this.now()).submit)void this.submit(this.state.code!);else if(this.incomplete)void this.retryCaptcha();return;}
+    if(remaining<=0){if(controls(this.state,this.now()).submit)void this.submit();else if(this.incomplete)void this.retryCaptcha();return;}
     this.timer=setTimeout(this.tick,Math.min(250,remaining));
   };
   editCode(code:string) {
@@ -132,7 +131,7 @@ export class Reservation {
       this.diagnostics.record('log','OCR输出检查',{length:code.length,valid:/^\d{4}$/.test(code)});
       if(!/^\d{4}$/.test(code)){await this.ocrFailed();return;}
       this.set('input','',{code});
-      if(this.now()+this.offset>=this.state.activity!.startsAt)await this.submit(code);
+      if(this.now()+this.offset>=this.state.activity!.startsAt)await this.submit();
     }catch{if(this.valid(g)&&epoch===this.ocrEpoch)await this.ocrFailed();}
   }
   private async ocrFailed() {
@@ -146,32 +145,25 @@ export class Reservation {
     await this.retryCaptcha();
   }
   private async retryCaptcha() {
-    const g=this.generation;
     this.diagnostics.record('warn','验证码重试');
-    this.set('captcha-loading','正在检查余位并更新验证码',{image:undefined,code:''});
-    try {
-      const data=await this.stage('重试余位查询',()=>this.api.list());
-      if(!this.valid(g))return;
-      const activity=data.activities.find(a=>a.id===this.state.activity!.id);
-      if(!activity || !knownCount(activity)) {this.stop('无法确认剩余人数，已停止自动重试');return;}
-      this.offset=data.offset;this.state={...this.state,activity,offset:this.offset};
-      this.diagnostics.record('log','人数快照',{count:activity.count,capacity:activity.capacity});
-      if(!this.bookable())return;
-      this.set('input','');await this.loadCaptcha();
-    }catch(error){if(this.valid(g))this.stop(message(error));}
+    this.set('input','正在更新验证码',{image:undefined,code:''});
+    await this.loadCaptcha();
   }
-  async submit(code:string) {
+  async submit() {
     if(!controls(this.state,this.now()).submit || !this.bookable())return;
-    code=this.state.code!.trim();if(!/^\d{4}$/.test(code))return;
+    const code=this.state.code!.trim();
     ++this.ocrEpoch;clearTimeout(this.timer);
     const g=this.generation;++this.submissions;
+    this.diagnostics.record('log','提交时机',{afterOpenMs:this.now()+this.offset-this.state.activity!.startsAt});
     this.set('submitting','正在提交预约');
-    try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));}
+    try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));this.diagnostics.record('log','服务端报告预约成功',{responseCode:0,responseData:1});}
     catch(error){
       if(!this.valid(g))return;
       if(error instanceof ApiError && ['session','rate'].includes(error.kind)){this.stop(message(error));return;}
       if(error instanceof ApiError && error.kind==='business'){
-        if(error.message.includes('验证码')){await this.retryCaptcha();return;}
+        const reason=businessReason(error.message);
+        if(reason==='already-booked'){await this.verify();return;}
+        if(reason==='captcha-rejected' || reason==='not-open'){await this.retryCaptcha();return;}
         this.stop(error.message);return;
       }
       this.diagnostics.record('warn','提交结果不明，转入核验',errorInfo(error));

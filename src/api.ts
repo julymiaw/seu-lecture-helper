@@ -6,6 +6,7 @@ export interface Activity {
   reserved: boolean; cancelled: boolean; capacity: number; count: number; countKnown: boolean;
 }
 export class ApiError extends Error {
+  feedback?: {code: number | string; datas: number | boolean | null; msg: string};
   constructor(message: string, public kind: 'business' | 'network' | 'session' | 'format' | 'rate', public httpStatus?: number, public businessCode?: number) { super(message); }
 }
 export function schoolTime(value: unknown): number {
@@ -56,7 +57,13 @@ export class Api implements ReservationApi {
       const text = await response.text();
       try { body = JSON.parse(text); } catch { throw new ApiError('响应不是有效 JSON，请检查登录或稍后重试', 'format'); }
       if (!body || body.code === undefined) throw new ApiError('接口响应格式已变化', 'format');
-      if (String(body.code) !== '0') throw new ApiError(String(body.msg || '预约操作未成功'), 'business', httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : undefined);
+      if (String(body.code) !== '0') {
+        const error = new ApiError(String(body.msg || '预约操作未成功'), 'business', httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : undefined);
+        // Retain only the business envelope; omit arbitrary response data and debugException.
+        const msg = String(body.msg || '').replace(/data:image\/[^\s]+/gi, '[image]').replace(/(?:cookie|authorization|token|password)\s*[:=]\s*[^\s,;]+/gi, '[credential]').replace(/\b\d{4}\b/g, '[digits]').slice(0, 500);
+        error.feedback = {code: typeof body.code === 'number' ? body.code : String(body.code).slice(0, 32), datas: body.datas === null || typeof body.datas === 'number' || typeof body.datas === 'boolean' ? body.datas : null, msg};
+        throw error;
+      }
       return body.datas;
     } catch (error) {
       if (error instanceof ApiError) {error.httpStatus ??= httpStatus; throw error;}

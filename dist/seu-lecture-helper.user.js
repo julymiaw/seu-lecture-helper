@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.4.0
-// @description  倒计时预约、低频余位监测、本地 OCR／手动验证码与结果核验
+// @version      0.4.1
+// @description  提前准备验证码、人工修正、到点提交与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
 // @run-at       document-idle
@@ -60,6 +60,7 @@ SOFTWARE.
       this.httpStatus = httpStatus;
       this.businessCode = businessCode;
     }
+    feedback;
   };
   function schoolTime(value) {
     const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(String(value));
@@ -123,7 +124,12 @@ SOFTWARE.
           throw new ApiError("\u54CD\u5E94\u4E0D\u662F\u6709\u6548 JSON\uFF0C\u8BF7\u68C0\u67E5\u767B\u5F55\u6216\u7A0D\u540E\u91CD\u8BD5", "format");
         }
         if (!body || body.code === void 0) throw new ApiError("\u63A5\u53E3\u54CD\u5E94\u683C\u5F0F\u5DF2\u53D8\u5316", "format");
-        if (String(body.code) !== "0") throw new ApiError(String(body.msg || "\u9884\u7EA6\u64CD\u4F5C\u672A\u6210\u529F"), "business", httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : void 0);
+        if (String(body.code) !== "0") {
+          const error = new ApiError(String(body.msg || "\u9884\u7EA6\u64CD\u4F5C\u672A\u6210\u529F"), "business", httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : void 0);
+          const msg = String(body.msg || "").replace(/data:image\/[^\s]+/gi, "[image]").replace(/(?:cookie|authorization|token|password)\s*[:=]\s*[^\s,;]+/gi, "[credential]").replace(/\b\d{4}\b/g, "[digits]").slice(0, 500);
+          error.feedback = { code: typeof body.code === "number" ? body.code : String(body.code).slice(0, 32), datas: body.datas === null || typeof body.datas === "number" || typeof body.datas === "boolean" ? body.datas : null, msg };
+          throw error;
+        }
         return body.datas;
       } catch (error) {
         if (error instanceof ApiError) {
@@ -168,13 +174,16 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.4.0";
+  var version = "0.4.1";
 
   // src/diagnostics.ts
   var VERSION = version;
   var sequence = 0;
   function errorInfo(error) {
     if (error instanceof ApiError) return {
+      serverMessage: error.feedback?.msg,
+      responseCode: error.feedback?.code,
+      responseData: error.feedback?.datas === null ? "null" : error.feedback?.datas,
       kind: error.kind,
       httpStatus: error.httpStatus,
       businessCode: error.businessCode,
@@ -183,10 +192,12 @@ SOFTWARE.
     return { kind: "unexpected" };
   }
   function businessReason(text) {
+    if (text.includes("\u9891\u7E41") || text.includes("\u9650\u6D41")) return "rate";
+    if (text.includes("\u767B\u5F55") || text.includes("\u6743\u9650")) return "session-or-permission";
+    if (text.includes("\u5DF2\u9884\u7EA6") || text.includes("\u91CD\u590D\u9884\u7EA6")) return "already-booked";
+    if (text.includes("\u5C1A\u672A\u5F00\u653E\u9884\u7EA6")) return "not-open";
     if (text.includes("\u9A8C\u8BC1\u7801")) return "captcha-rejected";
     if (text.includes("\u4EBA\u6570\u5DF2\u6EE1")) return "full";
-    if (text.includes("\u767B\u5F55") || text.includes("\u6743\u9650")) return "session-or-permission";
-    if (text.includes("\u9891\u7E41") || text.includes("\u9650\u6D41")) return "rate";
     if (text.includes("\u7ED3\u675F")) return "ended";
     if (text.includes("\u53D6\u6D88")) return "cancelled";
     return "other";
@@ -222,9 +233,6 @@ SOFTWARE.
   };
 
   // src/reservation.ts
-  function knownCount(item) {
-    return item.countKnown && Number.isInteger(item.count) && item.count >= 0 && Number.isInteger(item.capacity) && item.capacity > 0 && item.count <= item.capacity;
-  }
   function fullCapacity(state) {
     const a = state.activity;
     return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);
@@ -358,7 +366,7 @@ SOFTWARE.
         void this.loadCaptcha();
       }
       if (remaining <= 0) {
-        if (controls(this.state, this.now()).submit) void this.submit(this.state.code);
+        if (controls(this.state, this.now()).submit) void this.submit();
         else if (this.incomplete) void this.retryCaptcha();
         return;
       }
@@ -407,7 +415,7 @@ SOFTWARE.
           return;
         }
         this.set("input", "", { code });
-        if (this.now() + this.offset >= this.state.activity.startsAt) await this.submit(code);
+        if (this.now() + this.offset >= this.state.activity.startsAt) await this.submit();
       } catch {
         if (this.valid(g) && epoch === this.ocrEpoch) await this.ocrFailed();
       }
@@ -425,38 +433,22 @@ SOFTWARE.
       await this.retryCaptcha();
     }
     async retryCaptcha() {
-      const g = this.generation;
       this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5");
-      this.set("captcha-loading", "\u6B63\u5728\u68C0\u67E5\u4F59\u4F4D\u5E76\u66F4\u65B0\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
-      try {
-        const data = await this.stage("\u91CD\u8BD5\u4F59\u4F4D\u67E5\u8BE2", () => this.api.list());
-        if (!this.valid(g)) return;
-        const activity2 = data.activities.find((a) => a.id === this.state.activity.id);
-        if (!activity2 || !knownCount(activity2)) {
-          this.stop("\u65E0\u6CD5\u786E\u8BA4\u5269\u4F59\u4EBA\u6570\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
-          return;
-        }
-        this.offset = data.offset;
-        this.state = { ...this.state, activity: activity2, offset: this.offset };
-        this.diagnostics.record("log", "\u4EBA\u6570\u5FEB\u7167", { count: activity2.count, capacity: activity2.capacity });
-        if (!this.bookable()) return;
-        this.set("input", "");
-        await this.loadCaptcha();
-      } catch (error) {
-        if (this.valid(g)) this.stop(message(error));
-      }
+      this.set("input", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
+      await this.loadCaptcha();
     }
-    async submit(code) {
+    async submit() {
       if (!controls(this.state, this.now()).submit || !this.bookable()) return;
-      code = this.state.code.trim();
-      if (!/^\d{4}$/.test(code)) return;
+      const code = this.state.code.trim();
       ++this.ocrEpoch;
       clearTimeout(this.timer);
       const g = this.generation;
       ++this.submissions;
+      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { afterOpenMs: this.now() + this.offset - this.state.activity.startsAt });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
       try {
         await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
+        this.diagnostics.record("log", "\u670D\u52A1\u7AEF\u62A5\u544A\u9884\u7EA6\u6210\u529F", { responseCode: 0, responseData: 1 });
       } catch (error) {
         if (!this.valid(g)) return;
         if (error instanceof ApiError && ["session", "rate"].includes(error.kind)) {
@@ -464,7 +456,12 @@ SOFTWARE.
           return;
         }
         if (error instanceof ApiError && error.kind === "business") {
-          if (error.message.includes("\u9A8C\u8BC1\u7801")) {
+          const reason = businessReason(error.message);
+          if (reason === "already-booked") {
+            await this.verify();
+            return;
+          }
+          if (reason === "captcha-rejected" || reason === "not-open") {
             await this.retryCaptcha();
             return;
           }
@@ -547,7 +544,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.panel = this.get("dialog");
       this.get("form").addEventListener("submit", (e) => {
         e.preventDefault();
-        actions.submit(this.get("input").value);
+        actions.submit();
       });
       this.get("input").addEventListener("input", () => actions.edit(this.get("input").value));
       this.get("#lead").addEventListener("change", () => actions.configure(Number(this.get("#lead").value)));
@@ -3624,8 +3621,8 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           current?.dialog.render(state);
         }, Date.now, () => true, ocr);
         const dialog = new Dialog({
-          submit: (code) => {
-            void task.submit(code);
+          submit: () => {
+            void task.submit();
           },
           edit: (code) => task.editCode(code),
           refresh: () => {

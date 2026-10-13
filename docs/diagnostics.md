@@ -8,7 +8,7 @@
 
 | 字段／事件 | 用途 |
 | --- | --- |
-| 活动查询、重试余位查询 | 查询耗时和已知人数、容量 |
+| 活动查询 | 打开活动的查询耗时 |
 | OCR准备与预热 | 是否在开放前准备好识别引擎 |
 | 开始取图轮次 | `round`、`afterOpenMs`、`ocrReady`、标签页可见性 |
 | 验证码获取、OCR识别、预约提交、预约记录核验 | 开始、完成／失败及 `durationMs` |
@@ -17,6 +17,6 @@
 | `kind`、`reason`、`httpStatus`、`businessCode` | 错误分类及可获得的数字状态码 |
 | `stale` | 返回时任务或 OCR 已切换，结果不再适用 |
 
-`reason` 中 `captcha-rejected` 表示验证码相关业务提示，`full` 表示满员，`timeout` 表示请求超时。其他错误使用 session、rate、format、network 或 other 等分类，不输出服务器原文及异常堆栈。未知提交结果仍先核验。
+`reason` 中 `captcha-rejected` 表示验证码相关业务提示，`full` 表示满员，`timeout` 表示请求超时，`not-open` 表示未开放，`already-booked` 表示需核验已有预约。业务失败额外记录 `serverMessage`、`responseCode`、`responseData`；消息中的凭据、图片和独立四位数字会替换。不记录异常堆栈或任意响应对象。未知提交结果仍先核验。
 
 日志不包含密码、Cookie、验证码图片、验证码答案、完整请求或响应。活动 ID 和人数属于诊断信息。阶段耗时包含该阶段的等待与处理，不能直接区分服务器排队与网络延迟；`afterOpenMs` 基于估算的服务器时间偏差，不能视为精确的服务器到达时间。普通请求与 OCR 的计时可以帮助定位瓶颈，但不能单凭日志证明未抢到的唯一原因。

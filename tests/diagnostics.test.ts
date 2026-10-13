@@ -34,7 +34,7 @@ it('traces a complete reservation without exposing captcha data', async () => {
   const api = await mockApi(); const task = new Reservation(api, vi.fn(), () => NOW);
   await task.open((await sample()).id);
   for (let i = 0; i < 8; i++) await Promise.resolve();
-  task.editCode('0733'); await task.submit('0733');
+  task.editCode('0733'); await task.submit();
   const logs = vi.mocked(console.log).mock.calls.map(call => call[1]);
   expect(logs.map(row => row.event)).toEqual(expect.arrayContaining(['验证码获取开始','验证码获取完成','预约提交开始','预约提交完成','预约记录核验完成','核验结果']));
   expect(logs.find(row => row.phase === 'success')).toMatchObject({round:1, submissions:1});
@@ -54,4 +54,13 @@ it('does not log each countdown tick', async () => {
   await vi.advanceTimersByTimeAsync(3000);
   expect(vi.mocked(console.log).mock.calls).toHaveLength(before);
   task.close();
+});
+it('records concrete business feedback but omits images, credential fields and captcha answers',async()=>{
+  const {Api}=await import('../src/api');
+  const api=new Api(vi.fn(async()=>new Response(JSON.stringify({code:-1,datas:null,msg:'尚未开放预约',debugException:'private'}))));
+  await expect(new Diagnostics().measure('预约提交',()=>api.submit('id','0733'))).rejects.toBeInstanceOf(ApiError);
+  expect(vi.mocked(console.warn).mock.calls[0][1]).toMatchObject({serverMessage:'尚未开放预约',responseCode:-1,responseData:'null',reason:'not-open'});
+  const unsafe=new Api(vi.fn(async()=>new Response(JSON.stringify({code:-1,datas:{token:'private'},msg:'验证码 0733 token=private data:image/png;base64,SECRET'}))));
+  await expect(new Diagnostics().measure('预约提交',()=>unsafe.submit('id','0733'))).rejects.toBeInstanceOf(ApiError);
+  const logs=JSON.stringify(vi.mocked(console.warn).mock.calls);expect(logs).not.toContain('0733');expect(logs).not.toContain('private');expect(logs).not.toContain('SECRET');
 });

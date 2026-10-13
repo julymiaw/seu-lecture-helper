@@ -64,23 +64,21 @@ it.each(['session','rate'] as const)('stops on %s without resubmitting or hiding
 it('full response is terminal and never starts monitoring',async()=>{
   const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('人数已满','business');})}});task.start();await flush();await vi.advanceTimersByTimeAsync(120000);expect(task.state.phase).toBe('failed');expect(api.captcha).toHaveBeenCalledTimes(1);
 });
-it('retry stops when the refreshed list is full or unknown',async()=>{
-  for(const variant of [{count:5000,capacity:5000,countKnown:true},{countKnown:false}]){
-    const engine=ocr();engine.recognize.mockResolvedValue('');const{task,api,activity}=await setup({ocr:engine});
-    vi.mocked(api.list).mockResolvedValue({activities:[{...activity,...variant}],offset:0});task.start();await flush();expect(task.state.phase).toBe('failed');expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).not.toHaveBeenCalled();
-  }
+it('captcha retry does not query capacity even if the list changes',async()=>{
+  const engine=ocr();engine.recognize.mockResolvedValueOnce('');const{task,api}=await setup({ocr:engine});
+  task.start();await flush();expect(task.state.phase).toBe('success');expect(api.list).toHaveBeenCalledTimes(1);expect(api.captcha).toHaveBeenCalledTimes(2);
 });
 it('model preparation failure permits manual correction and timed submission',async()=>{
   const{task,api}=await setup({future:10000,ocr:{prepare:async()=>{throw new Error('assets');},recognize:vi.fn()}});task.start();await flush();expect(task.state.ocrStatus).toBe('failed');task.editCode('0654');await vi.advanceTimersByTimeAsync(10000);expect(api.submit).toHaveBeenCalledWith(task.state.activity!.id,'0654');
 });
 it('never submits empty input at opening and permits later manual submit',async()=>{
-  const{task,api}=await setup({future:10000});task.start();await flush();await vi.advanceTimersByTimeAsync(10000);expect(api.submit).not.toHaveBeenCalled();task.editCode('1234');await task.submit('1234');expect(task.state.phase).toBe('success');
+  const{task,api}=await setup({future:10000});task.start();await flush();await vi.advanceTimersByTimeAsync(10000);expect(api.submit).not.toHaveBeenCalled();task.editCode('1234');await task.submit();expect(task.state.phase).toBe('success');
 });
 it('serializes writes and verifies timeout without resubmitting',async()=>{
-  const pending=deferred<void>();const{task,api}=await setup({overrides:{submit:vi.fn(()=>pending.promise)}});task.start();await flush();task.editCode('1234');const write=task.submit('1234');void task.submit('1234');expect(task.close()).toBe(false);expect(controls(task.state).refresh).toBe(false);pending.reject(new ApiError('超时','network'));await write;expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);
+  const pending=deferred<void>();const{task,api}=await setup({overrides:{submit:vi.fn(()=>pending.promise)}});task.start();await flush();task.editCode('1234');const write=task.submit();void task.submit();expect(task.close()).toBe(false);expect(controls(task.state).refresh).toBe(false);pending.reject(new ApiError('超时','network'));await write;expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);
 });
 it('verification is bounded; unknown outcomes only allow rechecking',async()=>{
-  const{task,api}=await setup({overrides:{booked:vi.fn(async()=>false)}});task.start();await flush();task.editCode('1234');const write=task.submit('1234');await vi.runAllTimersAsync();await write;expect(task.state.phase).toBe('unknown');expect(api.booked).toHaveBeenCalledTimes(3);
+  const{task,api}=await setup({overrides:{booked:vi.fn(async()=>false)}});task.start();await flush();task.editCode('1234');const write=task.submit();await vi.runAllTimersAsync();await write;expect(task.state.phase).toBe('unknown');expect(api.booked).toHaveBeenCalledTimes(3);
   const check=task.verify();void task.verify();await vi.runAllTimersAsync();await check;expect(api.booked).toHaveBeenCalledTimes(6);expect(api.submit).toHaveBeenCalledTimes(1);
 });
 it('closing cancels the deadline and ignores late OCR',async()=>{
@@ -106,4 +104,22 @@ it('stops before requests when cross-tab ownership is lost',async()=>{
 });
 it('closing during a network retry cancels the remaining attempts',async()=>{
   const{task,api}=await setup({overrides:{captcha:vi.fn(async()=>{throw new ApiError('offline','network');})}});task.start();await flush();task.close();await vi.runAllTimersAsync();expect(api.captcha).toHaveBeenCalledTimes(1);
+});
+it('not-open rejection refreshes captcha and retries sequentially without polling or delays',async()=>{
+  const submit=vi.fn().mockRejectedValueOnce(new ApiError('尚未开放预约','business')).mockResolvedValue(undefined);
+  const{task,api}=await setup({ocr:ocr(),overrides:{submit}});task.start();await flush();
+  expect(submit).toHaveBeenCalledTimes(2);expect(api.captcha).toHaveBeenCalledTimes(2);expect(api.list).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('success');
+});
+it('already-booked feedback goes to verification rather than retrying',async()=>{
+  const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('已预约该活动','business');})}});task.start();await flush();expect(api.submit).toHaveBeenCalledTimes(1);expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.booked).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('success');
+});
+it('business rate or login messages containing captcha do not trigger retries',async()=>{
+  for(const msg of ['验证码请求过于频繁','登录失效，无法验证验证码']){
+    const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError(msg,'business');})}});task.start();await flush();expect(task.state.phase).toBe('failed');expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).toHaveBeenCalledTimes(1);
+  }
+});
+it('malformed or gateway-failed writes are verified without repeating the reservation',async()=>{
+  for(const kind of ['format','network'] as const){
+    const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('unknown result',kind,502);})}});task.start();await flush();expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);expect(api.booked).toHaveBeenCalledTimes(1);
+  }
 });

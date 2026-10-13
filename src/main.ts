@@ -35,7 +35,7 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
         mount.setActive(label ? state.activity?.id : undefined, label);
         current?.dialog.render(state);
       }, Date.now, () => true, ocr);
-      const dialog = new Dialog({submit: code => {void task.submit(code);}, edit: code => task.editCode(code), refresh: () => {void task.loadCaptcha();}, verify: () => {void task.verify();}, close, reload: () => location.reload(),
+      const dialog = new Dialog({submit: () => {void task.submit();}, edit: code => task.editCode(code), refresh: () => {void task.loadCaptcha();}, verify: () => {void task.verify();}, close, reload: () => location.reload(),
         start: () => task.start(), configure: seconds => task.configure(seconds), hide: () => dialog.hide()});
       current = {task, dialog, release};
       void task.open(id, false);
