@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.4.1
+// @version      0.4.2
 // @description  提前准备验证码、人工修正、到点提交与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -174,7 +174,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.4.1";
+  var version = "0.4.2";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -3533,7 +3533,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       Y.wasm.proxy = false;
       Y.wasm.wasmPaths = void 0;
       Y.wasm.wasmBinary = wasm;
-      this.session = await rs.create(new Uint8Array(model), { executionProviders: ["wasm"] });
+      this.session = await rs.create(new Uint8Array(model), { executionProviders: ["wasm"], logSeverityLevel: 3 });
       const input = new de("float32", new Float32Array(64 * 128).fill(1), [1, 1, 64, 128]);
       try {
         const outputs = await this.session.run({ [this.session.inputNames[0]]: input });

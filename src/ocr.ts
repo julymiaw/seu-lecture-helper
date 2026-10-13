@@ -29,7 +29,9 @@ export class BrowserOcr implements OcrEngine {
     ort.env.wasm.wasmPaths = undefined;
     // The npm WASM bundle embeds its JS loader. Only the verified binary is external.
     ort.env.wasm.wasmBinary = wasm;
-    this.session = await ort.InferenceSession.create(new Uint8Array(model), {executionProviders: ['wasm']});
+    // The upstream model declares a 2-D output but emits 3-D CTC scores.
+    // Decode actual dimensions below; retain runtime errors without warning spam.
+    this.session = await ort.InferenceSession.create(new Uint8Array(model), {executionProviders: ['wasm'], logSeverityLevel: 3});
     const input = new ort.Tensor('float32', new Float32Array(64 * 128).fill(1), [1, 1, 64, 128]);
     try {
       const outputs = await this.session.run({[this.session.inputNames[0]]: input});

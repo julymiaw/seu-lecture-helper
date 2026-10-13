@@ -65,6 +65,8 @@ test('installed bundle uses real WASM/model to recognize and submit, with safe d
   await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
   expect(state.writes()).toBe(1);expect(state.codes).toEqual(['3253']);expect(state.assetCalls()).toBe(3);expect(state.failures).toEqual([]);
   expect(logs.join('\n')).toContain('SEU预约助手');expect(logs.join('\n')).not.toContain('data:image');
+  expect(logs.join('\n')).not.toContain('VerifyOutputSizes');
+  expect(logs.join('\n')).not.toContain('Expected shape from model');
 });
 test('early image and OCR are editable; opening submits the correction, not the original OCR',async({page},testInfo)=>{
   await page.clock.install();const state=await setup(page,{future:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
