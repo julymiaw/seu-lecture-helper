@@ -62,7 +62,7 @@ export class Reservation {
     if (!this.ocr) {this.manual('本地识别不可用，请手动输入验证码'); return;}
     if (this.state.ocrStatus === 'ready') return;
     const g = this.generation;
-    this.set(this.state.phase, this.state.message, {ocrStatus: 'loading', ocrMessage: '正在准备本地识别 · 首次下载约 27 MB'});
+    this.set(this.state.phase, this.state.message, {ocrStatus: 'loading', ocrMessage: '正在准备本地识别 · 首次下载约 68 MB'});
     try {
       await this.ocr.prepare();
       if (this.valid(g)) this.set(this.state.phase, this.state.message, {ocrStatus: 'ready', ocrMessage: '本地识别已就绪 · 验证码不上传'});

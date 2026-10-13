@@ -1,5 +1,17 @@
 {
-  "model": {"path": "ddddocr-node@2.3.0/onnx/common_old.onnx", "bytes": 13606051, "sha256": "b8f2ad9cbc1f2e3922a6cb9459e30824e7e2467f3fb4fd61420640e34ea0bf68"},
-  "charset": {"path": "ddddocr-node@2.3.0/onnx/common_old.json", "bytes": 90091, "sha256": "9828b658125f45070969214957acf173ef778994089c10dddb03d1f6c136a9be"},
-  "wasm": {"path": "onnxruntime-web@1.30.0/dist/ort-wasm-simd-threaded.wasm", "bytes": 14239897, "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2"}
+  "model": {
+    "path": "ddddocr-node@2.3.0/onnx/common.onnx",
+    "bytes": 54088400,
+    "sha256": "33b5cd351ee94e73a6bf8fa18c415ed8b819b3ffd342e267c30d8ad8334e34e8"
+  },
+  "charset": {
+    "path": "ddddocr-node@2.3.0/onnx/common.json",
+    "bytes": 90092,
+    "sha256": "4b452bdd99297a0a0b531bfb6d4a7285db1395481e795e48df3f41be5f13ec10"
+  },
+  "wasm": {
+    "path": "onnxruntime-web@1.30.0/dist/ort-wasm-simd-threaded.wasm",
+    "bytes": 14239897,
+    "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2"
+  }
 }

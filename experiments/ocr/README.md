@@ -41,6 +41,18 @@ OCR_EVAL_DIR="$PWD/.cache/ocr-evaluation/2026-10-13" node experiments/ocr/benchm
 
 ## 依赖与范围
 
+补充的 PP-OCRv5／v6 预训练模型对比使用独立工具，不引入正式脚本依赖：
+
+```sh
+# 从项目根目录运行；仅实验准备需要 Python，正式脚本仍只需要浏览器
+python3 -m venv .cache/ocr-candidates/venv
+.cache/ocr-candidates/venv/bin/pip install onnx==1.17.0
+.cache/ocr-candidates/venv/bin/python experiments/ocr/prepare-paddle.py
+node experiments/ocr/paddle-benchmark.mjs .cache/ocr-evaluation/2026-10-13-50
+```
+
+模型 URL、大小和 SHA-256 固定在 `paddle-models.json`，来自 RapidOCR 发布清单；准备时校验权重并提取内嵌字典。浏览器测试使用 ONNX Runtime Web，BGR／CHW／48×320、等比缩放和零填充输入，分别比较原始及数字限定 CTC 解码。不训练、微调或使用样本标签修改模型；结果写入本地数据目录的 `paddle-comparison.json`。
+
 依赖只安装在本目录，不改正式脚本的依赖和分发文件。为复现现成包的浏览器构建失败，本实验保留 `ddddocr-node` 及其完整依赖；不建议原样把这套依赖加入正式脚本。
 
 本次依赖审计报告 4 项 moderate（同一 `sprintf-js → argparse → tensorflow → ddddocr-node` 依赖链），未执行自动降级或强制修复。直接 ONNX 识别代码不导入 TensorFlow 或 Jimp；后续产品接入可只保留推理引擎及选定模型。

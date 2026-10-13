@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.3.5
+// @version      0.3.6
 // @description  倒计时预约、低频余位监测、本地 OCR／手动验证码与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -16,7 +16,7 @@ ONNX Runtime Web 1.30.0 (bundled JavaScript and downloaded WASM)
 https://github.com/microsoft/onnxruntime
 Copyright (c) Microsoft Corporation
 
-ddddocr-node 2.3.0 (downloaded common_old.onnx and character table;
+ddddocr-node 2.3.0 (downloaded common.onnx (beta) and character table;
 its JavaScript implementation is not bundled)
 https://github.com/renhaoyeh/ddddocr-node
 Copyright (c) 2026 Ren-Hao Yeh
@@ -239,7 +239,7 @@ SOFTWARE.
       }
       if (this.state.ocrStatus === "ready") return;
       const g = this.generation;
-      this.set(this.state.phase, this.state.message, { ocrStatus: "loading", ocrMessage: "\u6B63\u5728\u51C6\u5907\u672C\u5730\u8BC6\u522B \xB7 \u9996\u6B21\u4E0B\u8F7D\u7EA6 27 MB" });
+      this.set(this.state.phase, this.state.message, { ocrStatus: "loading", ocrMessage: "\u6B63\u5728\u51C6\u5907\u672C\u5730\u8BC6\u522B \xB7 \u9996\u6B21\u4E0B\u8F7D\u7EA6 68 MB" });
       try {
         await this.ocr.prepare();
         if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "ready", ocrMessage: "\u672C\u5730\u8BC6\u522B\u5DF2\u5C31\u7EEA \xB7 \u9A8C\u8BC1\u7801\u4E0D\u4E0A\u4F20" });
@@ -3761,9 +3761,21 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
 
   // src/ocr-assets.json
   var ocr_assets_default = {
-    model: { path: "ddddocr-node@2.3.0/onnx/common_old.onnx", bytes: 13606051, sha256: "b8f2ad9cbc1f2e3922a6cb9459e30824e7e2467f3fb4fd61420640e34ea0bf68" },
-    charset: { path: "ddddocr-node@2.3.0/onnx/common_old.json", bytes: 90091, sha256: "9828b658125f45070969214957acf173ef778994089c10dddb03d1f6c136a9be" },
-    wasm: { path: "onnxruntime-web@1.30.0/dist/ort-wasm-simd-threaded.wasm", bytes: 14239897, sha256: "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2" }
+    model: {
+      path: "ddddocr-node@2.3.0/onnx/common.onnx",
+      bytes: 54088400,
+      sha256: "33b5cd351ee94e73a6bf8fa18c415ed8b819b3ffd342e267c30d8ad8334e34e8"
+    },
+    charset: {
+      path: "ddddocr-node@2.3.0/onnx/common.json",
+      bytes: 90092,
+      sha256: "4b452bdd99297a0a0b531bfb6d4a7285db1395481e795e48df3f41be5f13ec10"
+    },
+    wasm: {
+      path: "onnxruntime-web@1.30.0/dist/ort-wasm-simd-threaded.wasm",
+      bytes: 14239897,
+      sha256: "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2"
+    }
   };
 
   // src/ocr-assets.ts
@@ -3819,12 +3831,13 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
     } catch {
     }
   }
-  function decodeCtc(data, dims, charset) {
+  function decodeCtc(data, dims, charset, digitsOnly = false) {
     if (dims.length !== 3 || dims[1] !== 1 || dims[2] !== charset.length) throw new Error("OCR \u6A21\u578B\u8F93\u51FA\u683C\u5F0F\u4E0D\u5339\u914D");
+    const allowed = charset.map((char, index) => index === 0 || !digitsOnly || /^[0-9]$/.test(char));
     let previous = 0, text = "";
     for (let t = 0; t < dims[0]; t++) {
       let best = 0;
-      for (let c = 1; c < dims[2]; c++) if (data[t * dims[2] + c] > data[t * dims[2] + best]) best = c;
+      for (let c = 1; c < dims[2]; c++) if (allowed[c] && data[t * dims[2] + c] > data[t * dims[2] + best]) best = c;
       if (best !== 0 && best !== previous) text += charset[best];
       previous = best;
     }
@@ -3878,7 +3891,7 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
         const session = this.session;
         const outputs = await session.run({ [session.inputNames[0]]: input });
         try {
-          return decodeCtc(outputs[session.outputNames[0]].data, outputs[session.outputNames[0]].dims, this.charset);
+          return decodeCtc(outputs[session.outputNames[0]].data, outputs[session.outputNames[0]].dims, this.charset, true);
         } finally {
           Object.values(outputs).forEach((output) => output.dispose());
         }
@@ -3907,7 +3920,7 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
       }
     };
     notice2 = notice, close2 = close;
-    document.documentElement.setAttribute("data-seu-lecture-helper", "0.3.5");
+    document.documentElement.setAttribute("data-seu-lecture-helper", "0.3.6");
     const api = new Api();
     const ocr = new BrowserOcr();
     let current;

@@ -4,7 +4,7 @@ ONNX Runtime Web 1.30.0 (bundled JavaScript and downloaded WASM)
 https://github.com/microsoft/onnxruntime
 Copyright (c) Microsoft Corporation
 
-ddddocr-node 2.3.0 (downloaded common_old.onnx and character table;
+ddddocr-node 2.3.0 (downloaded common.onnx (beta) and character table;
 its JavaScript implementation is not bundled)
 https://github.com/renhaoyeh/ddddocr-node
 Copyright (c) 2026 Ren-Hao Yeh

@@ -7,12 +7,13 @@ export function savedMode(): InputMode {
   try {return localStorage.getItem(MODE_KEY) === 'manual' ? 'manual' : 'ocr';} catch {return 'ocr';}
 }
 export function saveMode(mode: InputMode) {try {localStorage.setItem(MODE_KEY, mode);} catch { /* Session preference only. */ }}
-export function decodeCtc(data: ArrayLike<number>, dims: readonly number[], charset: string[]): string {
+export function decodeCtc(data: ArrayLike<number>, dims: readonly number[], charset: string[], digitsOnly = false): string {
   if (dims.length !== 3 || dims[1] !== 1 || dims[2] !== charset.length) throw new Error('OCR 模型输出格式不匹配');
+  const allowed = charset.map((char,index)=>index===0 || !digitsOnly || /^[0-9]$/.test(char));
   let previous = 0, text = '';
   for (let t = 0; t < dims[0]; t++) {
     let best = 0;
-    for (let c = 1; c < dims[2]; c++) if (data[t * dims[2] + c] > data[t * dims[2] + best]) best = c;
+    for (let c = 1; c < dims[2]; c++) if (allowed[c] && data[t * dims[2] + c] > data[t * dims[2] + best]) best = c;
     if (best !== 0 && best !== previous) text += charset[best];
     previous = best;
   }
@@ -56,7 +57,7 @@ export class BrowserOcr implements OcrEngine {
     try {
       const session = this.session!;
       const outputs = await session.run({[session.inputNames[0]]: input});
-      try {return decodeCtc(outputs[session.outputNames[0]].data as Float32Array, outputs[session.outputNames[0]].dims, this.charset);}
+      try {return decodeCtc(outputs[session.outputNames[0]].data as Float32Array, outputs[session.outputNames[0]].dims, this.charset, true);}
       finally {Object.values(outputs).forEach(output => output.dispose());}
     } finally {input.dispose();}
   }
