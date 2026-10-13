@@ -6,7 +6,7 @@ import {message, Reservation} from './reservation';
 import {BrowserOcr, savedMode, saveMode} from './ocr';
 // Also prevents duplicate injection in one document.
 if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
-  document.documentElement.setAttribute('data-seu-lecture-helper', '0.3.4');
+  document.documentElement.setAttribute('data-seu-lecture-helper', '0.3.5');
   const api = new Api();
   const ocr = new BrowserOcr();
   let current: {task: Reservation; dialog: Dialog; release: () => void} | undefined;

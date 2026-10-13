@@ -20,16 +20,14 @@ describe('reservation controls and transitions',()=>{
     task.setMode('manual');expect(task.state.mode).toBe('ocr');
     task.configure({taskMode:'scheduled'});expect(task.state.mode).toBe('manual');task.close();
   });
-  it.each(['recognition','prepare','captcha'] as const)('a monitoring %s error unlocks manual fallback without looping',async failure=>{
+  it('a monitoring resource error unlocks manual fallback without looping',async()=>{
     const {task,api,ocr}=await setup();
-    if(failure==='prepare')ocr.prepare.mockRejectedValue(new Error('offline'));
-    if(failure==='recognition')ocr.recognize.mockResolvedValue('123');
-    if(failure==='captcha')api.submit.mockRejectedValue(new ApiError('验证码错误','business'));
+    ocr.prepare.mockRejectedValue(new Error('offline'));
     task.configure({taskMode:'monitor'});task.start();await flush();
     await vi.advanceTimersByTimeAsync(2000);await flush();
     expect(task.state).toMatchObject({phase:'input',mode:'manual',manualFallback:true});
-    expect(controls(task.state).manual).toBe(true);expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?3:0);
-    await vi.advanceTimersByTimeAsync(120000);expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?3:0);task.close();
+    expect(controls(task.state).manual).toBe(true);expect(api.submit).toHaveBeenCalledTimes(0);
+    await vi.advanceTimersByTimeAsync(120000);expect(api.submit).toHaveBeenCalledTimes(0);task.close();
   });
   it('a full event cannot select scheduled booking, fetch captcha or submit through any entry point',async()=>{
     const {task,api}=await setup(true);expect(controls(task.state).scheduled).toBe(false);

@@ -9,7 +9,7 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';badFirst?:boolean;rejectFull?:boolean;mode?:'manual'|'ocr';full?:boolean}={}) {
+async function setup(page:Page, options:{future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';badFirst?:boolean;fullOnRejection?:boolean;rejectFull?:boolean;mode?:'manual'|'ocr';full?:boolean}={}) {
   let booked=false,writes=0,captchaCalls=0,assetCalls=0;
   const codes:string[]=[];
   const failures:string[]=[];
@@ -38,7 +38,7 @@ async function setup(page:Page, options:{future?:boolean;blocked?:boolean;reject
     else if(name==='addReservation.do') {
       writes++; codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
       if(options.rejectFull&&writes===1) {full=true;result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};}
-      else if(options.rejectCode&&(writes===1||options.rejectCode==='three'&&writes<=3)) result={code:-1,datas:null,msg:'验证码错误，请重试'};
+      else if(options.rejectCode&&(writes===1||options.rejectCode==='three'&&writes<=3)){if(options.fullOnRejection&&writes>=2)full=true;result={code:-1,datas:null,msg:'验证码错误，请重试'};}
       else {booked=true;result={code:0,datas:1};}
     } else if(name==='queryMyActivityList.do') result={code:0,datas:{wdhdList:booked?[{HD_WID:raw.datas.hdlbList[0].WID,YY_WID:'fixture-id',FBZT:'1'}]:[]}};
     else {failures.push(name!);return route.abort();}
@@ -146,19 +146,25 @@ test('manual-to-OCR full rejection clears the old challenge and remains recovera
   expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
 });
 
-for(const failure of ['resource','captcha'] as const)test(`monitoring unlocks manual input after ${failure} failure and can complete booking`,async({page})=>{
-  const state=await setup(page,{mode:'manual',full:true,blocked:failure==='resource',rejectCode:failure==='captcha'?'three':false});
+test('monitoring unlocks manual input after resource failure and can complete booking',async({page})=>{
+  const state=await setup(page,{mode:'manual',full:true,blocked:true,rejectCode:false});
   await page.getByRole('button',{name:'预约助手'}).first().click();await page.getByRole('button',{name:'开始监测'}).click();
   await expect(page.getByRole('button',{name:'立即检查'})).toBeEnabled();
-  if(failure==='captcha'){
-    await expect(page.locator('#preparation')).toContainText('已就绪',{timeout:20000});
-    await expect(page.getByRole('radio',{name:'自动识别'})).toBeChecked();await expect(page.getByRole('radio',{name:'手动输入'})).toBeDisabled();
-  }
   state.releaseSeat();await page.getByRole('button',{name:'立即检查'}).click();
   await expect(page.getByRole('radio',{name:'手动输入'})).toBeChecked({timeout:20000});
   await expect(page.getByRole('radio',{name:'手动输入'})).toBeEnabled();await expect(page.getByLabel('验证码',{exact:true})).toBeFocused();
   await expect(page.getByRole('button',{name:'立即检查'})).not.toBeVisible();
-  expect(state.writes()).toBe(failure==='captcha'?3:0);
+  expect(state.writes()).toBe(0);
   await page.getByLabel('验证码',{exact:true}).fill('3253');await page.getByLabel('验证码',{exact:true}).press('Enter');
-  await expect(page.getByRole('status')).toContainText('已核验');expect(state.writes()).toBe(failure==='captcha'?4:1);expect(state.failures).toEqual([]);
+  await expect(page.getByRole('status')).toContainText('已核验');expect(state.writes()).toBe(1);expect(state.failures).toEqual([]);
 });
+
+ test('automatic CAPTCHA recovery is not limited to three attempts',async({page})=>{
+  const state=await setup(page,{rejectCode:'three'});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(4);expect(state.captchaCalls()).toBe(4);expect(state.failures).toEqual([]);
+ });
+ test('automatic CAPTCHA recovery stops when a new list confirms full capacity',async({page})=>{
+  const state=await setup(page,{rejectCode:'three',fullOnRejection:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.getByRole('button',{name:'开始监测'})).toBeEnabled({timeout:20000});await expect(page.getByRole('status')).toContainText('人数已满');
+  expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);await expect(page.getByAltText('预约验证码')).not.toBeVisible();
+ });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.3.4
+// @version      0.3.5
 // @description  倒计时预约、低频余位监测、本地 OCR／手动验证码与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -280,7 +280,7 @@ SOFTWARE.
       }
     }
     async retryOcr(reason, rejected = false) {
-      if (this.ocrAttempts >= 3 || this.state.ocrStatus === "failed") {
+      if (this.state.ocrStatus === "failed") {
         this.manual(`${reason}\uFF0C\u81EA\u52A8\u5C1D\u8BD5\u5DF2\u505C\u6B62\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165`);
         if (rejected) {
           this.set("input", this.state.message, { image: void 0 });
@@ -290,11 +290,27 @@ SOFTWARE.
       }
       const g = this.generation;
       this.autoSubmitted = false;
-      this.set("captcha-loading", `${reason}\uFF0C1 \u79D2\u540E\u6362\u56FE\u91CD\u8BD5\uFF08${this.ocrAttempts + 1}/3\uFF09`, { image: void 0 });
-      await this.wait(1e3);
-      if (!this.valid(g)) return;
-      this.set("input", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801");
-      await this.loadCaptcha();
+      this.set("captcha-loading", `${reason}\uFF0C\u6B63\u5728\u68C0\u67E5\u4F59\u4F4D\u5E76\u6362\u56FE\u91CD\u8BD5\uFF08\u7B2C ${this.ocrAttempts + 1} \u6B21\uFF09`, { image: void 0 });
+      try {
+        const data = await this.api.list();
+        if (!this.valid(g)) return;
+        const item = data.activities.find((x) => x.id === this.state.activity.id);
+        if (!item) throw new Error("\u5217\u8868\u4E2D\u672A\u627E\u5230\u8BE5\u6D3B\u52A8\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
+        this.offset = data.offset;
+        this.state = { ...this.state, activity: item, offset: this.offset, lastChecked: this.now(), full: false };
+        if (!this.bookable()) return;
+        if (!knownCount(item)) throw new Error("\u65E0\u6CD5\u786E\u8BA4\u5269\u4F59\u4EBA\u6570\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
+        if (fullCapacity(this.state)) {
+          const continueMonitoring = this.state.taskMode === "monitor" || this.state.followUp;
+          this.offerMonitor("\u5F53\u524D\u6D3B\u52A8\u9884\u7EA6\u4EBA\u6570\u5DF2\u6EE1\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9");
+          if (continueMonitoring) this.scheduleMonitor(this.jitter(), "\u540D\u989D\u5DF2\u6EE1\uFF0C\u7EE7\u7EED\u7B49\u5F85\u7A7A\u4F59\u540D\u989D");
+          return;
+        }
+        this.set("input", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801");
+        await this.loadCaptcha();
+      } catch (error) {
+        if (this.valid(g)) this.set("failed", message(error));
+      }
     }
     allowed() {
       if (this.owns()) return true;
@@ -3891,7 +3907,7 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
       }
     };
     notice2 = notice, close2 = close;
-    document.documentElement.setAttribute("data-seu-lecture-helper", "0.3.4");
+    document.documentElement.setAttribute("data-seu-lecture-helper", "0.3.5");
     const api = new Api();
     const ocr = new BrowserOcr();
     let current;

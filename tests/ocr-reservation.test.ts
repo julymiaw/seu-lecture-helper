@@ -40,20 +40,18 @@ describe('OCR reservation lifecycle',()=>{
     await task.loadCaptcha(); first.resolve('1111'); await settle(); expect(api.submit).not.toHaveBeenCalled();
     second.resolve('3253'); await settle(); expect(api.submit).toHaveBeenCalledExactlyOnceWith((await sample()).id,'3253');
   });
-  it('bounds automatic image replacement to three attempts before manual fallback',async()=>{
-    vi.useFakeTimers();vi.setSystemTime(NOW);
-    for(const failure of ['incomplete','load','captcha']) {
-      const api=await mockApi(),ocr=engine();
-      if(failure==='incomplete') ocr.recognize.mockResolvedValue('123');
-      if(failure==='load'){ocr.prepare.mockRejectedValue(new Error('download failed'));ocr.recognize.mockRejectedValue(new Error('download failed'));}
-      if(failure==='captcha')vi.mocked(api.submit).mockRejectedValue(new ApiError('验证码错误','business'));
-      const task=new Reservation(api,vi.fn(),Date.now,()=>true,ocr,'ocr');await task.open((await sample()).id);await settle();
-      await vi.advanceTimersByTimeAsync(2000);await settle();
-      expect(task.state).toMatchObject({phase:'input',mode:'manual'});expect(task.state.image).toBeTruthy();
-      expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?3:0);
-      expect(api.captcha).toHaveBeenCalledTimes(failure==='captcha'?4:failure==='load'?1:3);
-      const count=vi.mocked(api.captcha).mock.calls.length;await vi.advanceTimersByTimeAsync(60000);expect(api.captcha).toHaveBeenCalledTimes(count);task.close();
-    }
+  it('stops replacement when the latest list confirms full capacity',async()=>{
+    const base=await mockApi(),item=(await base.list()).activities[0];
+    const api={...base,list:vi.fn().mockResolvedValueOnce({activities:[item],offset:0}).mockResolvedValueOnce({activities:[item],offset:0}).mockResolvedValue({activities:[{...item,count:item.capacity,countKnown:true}],offset:0})};
+    const ocr=engine();ocr.recognize.mockResolvedValue('123');
+    const task=new Reservation(api,vi.fn(),()=>NOW,()=>true,ocr,'ocr');await task.open(item.id);await settle();await settle();
+    expect(task.state).toMatchObject({phase:'ready',taskMode:'monitor',full:true});expect(api.captcha).toHaveBeenCalledTimes(2);expect(api.submit).not.toHaveBeenCalled();task.close();
+  });
+  it('can recover after more than three failures without timer delays',async()=>{
+    const api=await mockApi(),ocr=engine();ocr.recognize.mockResolvedValueOnce('123').mockResolvedValueOnce('123').mockResolvedValueOnce('123').mockResolvedValueOnce('123');
+    const task=new Reservation(api,vi.fn(),()=>NOW,()=>true,ocr,'ocr');await task.open((await sample()).id);
+    for(let i=0;i<8;i++)await settle();
+    expect(task.state.phase).toBe('success');expect(api.captcha).toHaveBeenCalledTimes(5);expect(api.submit).toHaveBeenCalledTimes(1);task.close();
   });
   it.each(['incomplete','throw','captcha'])('recovers automatically from a transient %s error with a new image',async failure=>{
     vi.useFakeTimers();vi.setSystemTime(NOW);const api=await mockApi(),ocr=engine();
@@ -61,14 +59,20 @@ describe('OCR reservation lifecycle',()=>{
     if(failure==='throw')ocr.recognize.mockRejectedValueOnce(new Error('decode'));
     if(failure==='captcha')vi.mocked(api.submit).mockRejectedValueOnce(new ApiError('验证码错误','business'));
     const task=new Reservation(api,vi.fn(),Date.now,()=>true,ocr,'ocr');await task.open((await sample()).id);await settle();
-    expect(task.state.mode).toBe('ocr');expect(api.captcha).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(999);expect(api.captcha).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);await settle();expect(task.state.phase).toBe('success');
+    expect(task.state.mode).toBe('ocr');
+    await settle();await settle();expect(task.state.phase).toBe('success');
     expect(api.captcha).toHaveBeenCalledTimes(2);expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?2:1);task.close();
   });
-  it('closing during retry cancels the replacement request',async()=>{
-    vi.useFakeTimers();vi.setSystemTime(NOW);const api=await mockApi(),ocr=engine();ocr.recognize.mockResolvedValue('123');
-    const task=new Reservation(api,vi.fn(),Date.now,()=>true,ocr,'ocr');await task.open((await sample()).id);await settle();task.close();
-    await vi.advanceTimersByTimeAsync(5000);expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).not.toHaveBeenCalled();
+  it.each(['rate','network','session','format'] as const)('stops retry on a %s capacity-query error',async kind=>{
+    const base=await mockApi(),item=(await base.list()).activities[0];
+    const api={...base,list:vi.fn().mockResolvedValueOnce({activities:[item],offset:0}).mockRejectedValue(new ApiError('blocked',kind))};
+    const ocr=engine();ocr.recognize.mockResolvedValue('123');const task=new Reservation(api,vi.fn(),()=>NOW,()=>true,ocr,'ocr');await task.open(item.id);await settle();
+    expect(task.state.phase).toBe('failed');expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).not.toHaveBeenCalled();task.close();
+  });
+  it('drops a retry query that completes after closing',async()=>{
+    const base=await mockApi(),item=(await base.list()).activities[0],pending=deferred<{activities:typeof item[];offset:number}>();
+    const api={...base,list:vi.fn().mockResolvedValueOnce({activities:[item],offset:0}).mockImplementationOnce(()=>pending.promise)};
+    const ocr=engine();ocr.recognize.mockResolvedValue('123');const task=new Reservation(api,vi.fn(),()=>NOW,()=>true,ocr,'ocr');await task.open(item.id);await settle();task.close();
+    pending.resolve({activities:[item],offset:0});await settle();expect(api.captcha).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('closed');
   });
 });

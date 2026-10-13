@@ -98,18 +98,34 @@ export class Reservation {
     }
   }
   private async retryOcr(reason: string, rejected = false) {
-    if (this.ocrAttempts >= 3 || this.state.ocrStatus === 'failed') {
+    if (this.state.ocrStatus === 'failed') {
       this.manual(`${reason}，自动尝试已停止，请手动输入`);
       if (rejected) {this.set('input', this.state.message, {image: undefined}); await this.loadCaptcha();}
       return;
     }
     const g = this.generation;
     this.autoSubmitted = false;
-    this.set('captcha-loading', `${reason}，1 秒后换图重试（${this.ocrAttempts + 1}/3）`, {image: undefined});
-    await this.wait(1000);
-    if (!this.valid(g)) return;
-    this.set('input', '正在更新验证码');
-    await this.loadCaptcha();
+    this.set('captcha-loading', `${reason}，正在检查余位并换图重试（第 ${this.ocrAttempts + 1} 次）`, {image: undefined});
+    try {
+      const data = await this.api.list();
+      if (!this.valid(g)) return;
+      const item = data.activities.find(x => x.id === this.state.activity!.id);
+      if (!item) throw new Error('列表中未找到该活动，已停止自动重试');
+      this.offset = data.offset;
+      this.state = {...this.state, activity: item, offset: this.offset, lastChecked: this.now(), full: false};
+      if (!this.bookable()) return;
+      if (!knownCount(item)) throw new Error('无法确认剩余人数，已停止自动重试');
+      if (fullCapacity(this.state)) {
+        const continueMonitoring = this.state.taskMode === 'monitor' || this.state.followUp;
+        this.offerMonitor('当前活动预约人数已满，请重新选择');
+        if (continueMonitoring) this.scheduleMonitor(this.jitter(), '名额已满，继续等待空余名额');
+        return;
+      }
+      this.set('input', '正在更新验证码');
+      await this.loadCaptcha();
+    } catch (error) {
+      if (this.valid(g)) this.set('failed', message(error));
+    }
   }
   private allowed() {
     if (this.owns()) return true;
