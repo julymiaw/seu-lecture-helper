@@ -32,14 +32,15 @@ async function prepareImage(data) {
   return new ort.Tensor('float32', floats, [1, 1, height, width]);
 }
 
-function decode(output, charset) {
+function decode(output, charset, digitsOnly = false) {
   if (output.dims.length !== 3 || output.dims[1] !== 1) throw new Error(`Unexpected output shape: ${output.dims}`);
   const classes = output.dims[2];
+  const allowed = digitsOnly ? charset.map((char,index)=>index===0||/^[0-9]$/.test(char)) : undefined;
   let previous = 0;
   let text = '';
   for (let t = 0; t < output.dims[0]; t++) {
     let best = 0;
-    for (let c = 1; c < classes; c++) if (output.data[t * classes + c] > output.data[t * classes + best]) best = c;
+    for (let c = 1; c < classes; c++) if ((!allowed || allowed[c]) && output.data[t * classes + c] > output.data[t * classes + best]) best = c;
     if (best !== 0 && best !== previous) text += charset[best];
     previous = best;
   }
@@ -48,7 +49,7 @@ function decode(output, charset) {
 
 window.benchmarkDddd = async (samples) => {
   const results = [];
-  for (const [name, stem] of [['ddddocr-old', 'common_old'], ['ddddocr-beta', 'common']]) {
+  for (const [name, stem, digitsOnly] of [['ddddocr-old', 'common_old', false], ['ddddocr-beta', 'common', false], ['ddddocr-old-digits', 'common_old', true], ['ddddocr-beta-digits', 'common', true]]) {
     let session;
     try {
       const start = performance.now();
@@ -62,7 +63,7 @@ window.benchmarkDddd = async (samples) => {
         const input = await prepareImage(data);
         try {
           const outputs = await session.run({[session.inputNames[0]]: input});
-          try {return decode(outputs[session.outputNames[0]], charset);}
+          try {return decode(outputs[session.outputNames[0]], charset, digitsOnly);}
           finally {Object.values(outputs).forEach(output => output.dispose());}
         } finally {input.dispose();}
       };
