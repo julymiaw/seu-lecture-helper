@@ -10,6 +10,7 @@ const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
 async function setup(page:Page, options:{future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';badFirst?:boolean;fullOnRejection?:boolean;rejectFull?:boolean;mode?:'manual'|'ocr';full?:boolean}={}) {
+  const initialTime=Date.now();
   let booked=false,writes=0,captchaCalls=0,assetCalls=0;
   const codes:string[]=[];
   const failures:string[]=[];
@@ -29,8 +30,8 @@ async function setup(page:Page, options:{future?:boolean;blocked?:boolean;reject
     }
     const name=url.pathname.split('/').pop();
     if(!url.pathname.includes('/modules/hdyy/')) return route.fulfill({contentType:'text/html',body:html.replace('</body>',fixtureStyle+'</body>')});
-    const now=Date.now(),data=structuredClone(raw);
-    data.datas.xtdqsj=stamp(now); data.datas.hdlbList[0].YYKSSJ=stamp(now+(options.future?3600000:-3600000)); data.datas.hdlbList[0].YYJSSJ=stamp(now+7200000); data.datas.xsxxList=[];
+    const now=await page.evaluate(()=>Date.now()),data=structuredClone(raw);
+    data.datas.xtdqsj=stamp(now); data.datas.hdlbList[0].YYKSSJ=stamp(initialTime+(options.future?3600000:-3600000)); data.datas.hdlbList[0].YYJSSJ=stamp(now+7200000); data.datas.xsxxList=[];
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(name==='queryActivityList.do') result=data;
@@ -50,121 +51,56 @@ async function setup(page:Page, options:{future?:boolean;blocked?:boolean;reject
     const ctx=canvas.getContext('2d')!;ctx.fillStyle='white';ctx.fillRect(0,0,100,36);ctx.fillStyle='black';ctx.font='bold 26px serif';ctx.fillText('3253',8,27);return canvas.toDataURL('image/jpeg');
   });
   blank=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=100;c.height=36;const x=c.getContext('2d')!;x.fillStyle='white';x.fillRect(0,0,100,36);return c.toDataURL();});
-  if(options.mode) await page.evaluate(mode=>localStorage.setItem('seu-lecture-helper-input-mode',mode),options.mode);
+
   await page.addScriptTag({content:script});
   return {writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures,releaseSeat:()=>{full=false;}};
 }
 
-test('installed bundle uses real WASM/model to recognize and submit once; no external JS or school UI clicks',async({page,context})=>{
+test('installed bundle uses real WASM/model to recognize and submit, with safe diagnostics',async({page,context})=>{
+  const logs:string[]=[];page.on('console',msg=>{logs.push(msg.text());});
   await context.addCookies([{name:'cdn-test-cookie',value:'must-not-be-sent',url:'https://cdn.jsdelivr.net'}]);
-  const state=await setup(page);
-  await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  const state=await setup(page);await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
   await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
-  expect(state.writes()).toBe(1); expect(state.codes).toEqual(['3253']); expect(state.assetCalls()).toBe(3); expect(state.failures).toEqual([]);
+  expect(state.writes()).toBe(1);expect(state.codes).toEqual(['3253']);expect(state.assetCalls()).toBe(3);expect(state.failures).toEqual([]);
+  expect(logs.join('\n')).toContain('SEU预约助手');expect(logs.join('\n')).not.toContain('data:image');
 });
-
-test('countdown preloads OCR, mode can change, and cached assets survive a new page',async({page},testInfo)=>{
-  const state=await setup(page,{future:true});
-  await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.locator('#seu-lecture-helper-dialog').locator('#preparation')).toContainText('已就绪',{timeout:20000});
-  expect(state.captchaCalls()).toBe(0); expect(state.writes()).toBe(0);
-  const card=page.locator('.activity-container').first();
-  const native=await card.locator('button').first().boundingBox(),added=await card.locator('.seu-lecture-helper-button').boundingBox();
-  expect(added!.height).toBeCloseTo(native!.height,1); expect(added!.width).toBeCloseTo(native!.width,1);
-  await page.setViewportSize({width:375,height:850});
-  await page.screenshot({path:testInfo.outputPath('ocr-countdown-mobile.png')});
-  await page.getByRole('radio',{name:'手动输入'}).check();
-  await expect(page.getByRole('radio',{name:'手动输入'})).toBeChecked();
-  await page.getByRole('radio',{name:'自动识别'}).check();
-  await page.getByRole('button',{name:'关闭',exact:true}).click();
-  await page.reload();await page.addScriptTag({content:script});
-  await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.locator('#seu-lecture-helper-dialog').locator('#preparation')).toContainText('已就绪',{timeout:20000});
-  expect(state.assetCalls()).toBe(3); expect(state.failures).toEqual([]);
+test('early image and OCR are editable; opening submits the correction, not the original OCR',async({page},testInfo)=>{
+  await page.clock.install();const state=await setup(page,{future:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});expect(state.captchaCalls()).toBe(0);
+  await page.clock.fastForward(3571000);
+  await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});expect(state.writes()).toBe(0);
+  await expect(page.getByRole('img',{name:'预约验证码'})).toBeVisible();
+  await page.getByLabel('验证码',{exact:true}).fill('0006');
+  await page.screenshot({path:testInfo.outputPath('prepared-captcha.png')});
+  await page.clock.fastForward(30000);await expect(page.getByRole('status')).toContainText('已核验');expect(state.codes).toEqual(['0006']);expect(state.captchaCalls()).toBe(1);
 });
-
-test('a prepared OCR task obtains the challenge at the deadline and then submits',async({page})=>{
-  await page.clock.install();
-  const state=await setup(page,{future:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.locator('#seu-lecture-helper-dialog').locator('#preparation')).toContainText('已就绪',{timeout:20000});
-  expect(state.captchaCalls()).toBe(0);expect(state.writes()).toBe(0);
-  await page.clock.fastForward(3601000);
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
-  expect(state.captchaCalls()).toBe(1);expect(state.writes()).toBe(1);expect(state.codes).toEqual(['3253']);
+test('prefetched captcha rejected by server refreshes automatically and succeeds',async({page})=>{
+  await page.clock.install();const state=await setup(page,{future:true,rejectCode:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3571000);
+  await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});await page.clock.fastForward(30000);
+  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);
 });
-
-test('unavailable OCR falls back to focused manual input and retains the challenge',async({page},testInfo)=>{
-  const state=await setup(page,{blocked:true});
-  await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.getByRole('radio',{name:'手动输入'})).toBeChecked();
-  await expect(page.getByLabel('验证码',{exact:true})).toBeFocused();
-  await page.setViewportSize({width:375,height:850});
-  await page.screenshot({path:testInfo.outputPath('manual-fallback-mobile.png')});
-  const input=page.getByLabel('验证码',{exact:true});await input.fill('3253');await input.press('Enter');
-  await expect(page.getByRole('status')).toContainText('已核验'); expect(state.writes()).toBe(1); expect(state.captchaCalls()).toBe(1); expect(state.failures).toEqual([]);
+test('cached resources survive a new page; no removed mode or monitoring controls',async({page})=>{
+  const state=await setup(page,{future:true});await page.getByRole('button',{name:'预约助手'}).first().click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
+  await expect(page.getByRole('radio')).toHaveCount(0);await expect(page.getByRole('button',{name:'开始监测'})).toHaveCount(0);
+  expect(state.captchaCalls()).toBe(0);await page.getByRole('button',{name:'关闭',exact:true}).click();await page.reload();await page.addScriptTag({content:script});await page.getByRole('button',{name:'预约助手'}).first().click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});expect(state.assetCalls()).toBe(3);
 });
-
-test('OCR captcha rejection replaces the image and completes automatically',async({page})=>{
-  const state=await setup(page,{rejectCode:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
-  expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
+test('unavailable model keeps the image editable, with manual submission and no mode switch',async({page})=>{
+  const state=await setup(page,{blocked:true});await page.getByRole('button',{name:'预约助手'}).first().click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','failed',{timeout:20000});await page.locator('#start').click();
+  await expect(page.getByLabel('验证码',{exact:true})).toBeFocused();await page.getByLabel('验证码',{exact:true}).fill('3253');await page.getByLabel('验证码',{exact:true}).press('Enter');
+  await expect(page.getByRole('status')).toContainText('已核验');expect(state.codes).toEqual(['3253']);
 });
-
-for(const mode of ['scheduled','monitor'] as const)test(`unattended ${mode} replaces an unreadable challenge and books automatically`,async({page})=>{
-  const state=await setup(page,{badFirst:true});await page.getByRole('button',{name:'预约助手'}).first().click();
-  if(mode==='monitor')await page.getByRole('radio',{name:'余位监测'}).check();
-  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
-  expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(2);expect(state.codes).toEqual(['3253']);expect(state.failures).toEqual([]);
+test('retry stops when capacity becomes full; no ongoing monitoring',async({page})=>{
+  await page.clock.install();const state=await setup(page,{rejectCode:'three',fullOnRejection:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('人数已满',{timeout:20000});const count=state.captchaCalls();await page.clock.fastForward(120000);expect(state.captchaCalls()).toBe(count);expect(state.writes()).toBe(2);
 });
-
-test('monitoring prewarms real OCR without a challenge, then books a released seat and stops',async({page})=>{
-  await page.clock.install();const state=await setup(page,{full:true});await page.getByRole('button',{name:'预约助手'}).first().click();
-  await page.getByLabel('检查间隔').selectOption('30');await page.getByRole('button',{name:'开始监测'}).click();
-  await expect(page.locator('#preparation')).toContainText('已就绪',{timeout:20000});expect(state.captchaCalls()).toBe(0);expect(state.writes()).toBe(0);
-  await page.getByRole('button',{name:'收起',exact:true}).click();state.releaseSeat();await page.clock.fastForward(34000);
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);expect(state.codes).toEqual(['3253']);expect(state.captchaCalls()).toBe(1);
-  await page.clock.fastForward(180000);expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);expect(state.failures).toEqual([]);
+test('compact dialog fits a narrow viewport and reopen retains the answer',async({page},testInfo)=>{
+  await page.clock.install();const state=await setup(page,{future:true});await page.setViewportSize({width:375,height:700});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3571000);await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});
+  await page.getByRole('button',{name:'收起',exact:true}).click();await page.getByRole('button',{name:'预约中'}).first().click();await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253');
+  const fits=await page.locator('#seu-lecture-helper-dialog').locator('dialog').evaluate(el=>el.scrollHeight<=el.clientHeight && el.scrollWidth<=el.clientWidth);expect(fits).toBe(true);
+  await page.screenshot({path:testInfo.outputPath('prepared-mobile.png')});expect(state.writes()).toBe(0);
 });
-
-test('manual-to-OCR full rejection clears the old challenge and remains recoverable',async({page})=>{
-  await page.clock.install();const state=await setup(page,{mode:'manual',rejectFull:true});
-  await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.getByLabel('验证码',{exact:true})).toBeFocused();
-  await page.getByRole('radio',{name:'自动识别'}).check();
-  await expect(page.getByRole('button',{name:'开始监测'})).toBeEnabled({timeout:20000});
-  await expect(page.getByRole('radio',{name:'定时预约'})).toBeDisabled();
-  await expect(page.getByRole('radio',{name:'余位监测'})).toBeChecked();
-  await expect(page.getByRole('radio',{name:'余位监测'})).toBeEnabled();
-  await expect(page.getByAltText('预约验证码')).not.toBeVisible();
-  await expect(page.getByRole('radio',{name:'手动输入'})).toBeDisabled();
-  await page.clock.fastForward(180000);expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);
-  await page.getByLabel('检查间隔').selectOption('30');await page.getByRole('button',{name:'开始监测'}).click();
-  await expect(page.getByRole('status')).toContainText('等待空余名额');
-  await page.clock.fastForward(34000);await expect(page.getByRole('button',{name:'立即检查'})).toBeEnabled();expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);
-  state.releaseSeat();await page.clock.fastForward(34000);
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
-  expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
-});
-
-test('monitoring unlocks manual input after resource failure and can complete booking',async({page})=>{
-  const state=await setup(page,{mode:'manual',full:true,blocked:true,rejectCode:false});
-  await page.getByRole('button',{name:'预约助手'}).first().click();await page.getByRole('button',{name:'开始监测'}).click();
-  await expect(page.getByRole('button',{name:'立即检查'})).toBeEnabled();
-  state.releaseSeat();await page.getByRole('button',{name:'立即检查'}).click();
-  await expect(page.getByRole('radio',{name:'手动输入'})).toBeChecked({timeout:20000});
-  await expect(page.getByRole('radio',{name:'手动输入'})).toBeEnabled();await expect(page.getByLabel('验证码',{exact:true})).toBeFocused();
-  await expect(page.getByRole('button',{name:'立即检查'})).not.toBeVisible();
-  expect(state.writes()).toBe(0);
-  await page.getByLabel('验证码',{exact:true}).fill('3253');await page.getByLabel('验证码',{exact:true}).press('Enter');
-  await expect(page.getByRole('status')).toContainText('已核验');expect(state.writes()).toBe(1);expect(state.failures).toEqual([]);
-});
-
- test('automatic CAPTCHA recovery is not limited to three attempts',async({page})=>{
-  const state=await setup(page,{rejectCode:'three'});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(4);expect(state.captchaCalls()).toBe(4);expect(state.failures).toEqual([]);
- });
- test('automatic CAPTCHA recovery stops when a new list confirms full capacity',async({page})=>{
-  const state=await setup(page,{rejectCode:'three',fullOnRejection:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.getByRole('button',{name:'开始监测'})).toBeEnabled({timeout:20000});await expect(page.getByRole('status')).toContainText('人数已满');
-  expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);await expect(page.getByAltText('预约验证码')).not.toBeVisible();
- });

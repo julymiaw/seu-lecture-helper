@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.3.7
+// @version      0.4.0
 // @description  倒计时预约、低频余位监测、本地 OCR／手动验证码与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -168,7 +168,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.3.7";
+  var version = "0.4.0";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -226,461 +226,263 @@ SOFTWARE.
     return item.countKnown && Number.isInteger(item.count) && item.count >= 0 && Number.isInteger(item.capacity) && item.capacity > 0 && item.count <= item.capacity;
   }
   function fullCapacity(state) {
-    const item = state.activity;
-    return Boolean(state.full || item?.countKnown && Number.isInteger(item.capacity) && item.capacity > 0 && Number.isInteger(item.count) && item.count >= item.capacity);
+    const a = state.activity;
+    return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);
   }
   function controls(state, now = Date.now()) {
-    const item = state.activity, serverNow = now + (state.offset ?? 0);
-    const active = Boolean(item && !item.reserved && !item.cancelled && serverNow < item.endsAt);
-    const adjustable = active && ["ready", "waiting", "monitoring", "paused", "captcha-loading", "recognizing", "input"].includes(state.phase);
-    const free = !fullCapacity(state);
+    const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now + (state.offset ?? 0) < a.endsAt && !fullCapacity(state));
+    const editable = active && ["waiting", "input", "recognizing"].includes(state.phase) && Boolean(state.image);
     return {
-      scheduled: adjustable && free,
-      monitor: adjustable,
-      mode: adjustable,
-      manual: adjustable && (state.taskMode !== "monitor" || Boolean(state.manualFallback)),
-      checkNow: active && state.phase === "monitoring" && !state.checking && !(state.retryAt && state.retryAt > now) && serverNow >= item.startsAt,
-      start: active && ["ready", "paused"].includes(state.phase) && (state.taskMode === "monitor" || free),
-      submit: active && free && state.phase === "input" && Boolean(state.image) && serverNow >= item.startsAt,
-      interval: active && ["ready", "waiting", "monitoring", "paused"].includes(state.phase),
-      followUp: active && ["ready", "waiting"].includes(state.phase)
+      start: active && state.phase === "ready",
+      edit: editable,
+      refresh: editable,
+      submit: editable && now + (state.offset ?? 0) >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
+      close: !["submitting", "verifying"].includes(state.phase)
     };
   }
   var Reservation = class {
-    constructor(api, publish, now = Date.now, owns = () => true, ocr, mode = "manual", random = Math.random) {
+    constructor(api, publish, now = Date.now, owns = () => true, ocr) {
       this.api = api;
       this.publish = publish;
       this.now = now;
       this.owns = owns;
       this.ocr = ocr;
-      this.random = random;
-      this.mode = mode;
-      this.scheduledMode = mode;
     }
     state = { phase: "closed", message: "" };
     generation = 0;
+    ocrEpoch = 0;
     timer;
+    retryTimer;
     wake;
     offset = 0;
-    ocrEpoch = 0;
-    autoSubmitted = false;
-    ocrAttempts = 0;
-    mode;
-    scheduledMode;
-    checking = false;
-    failures = 0;
-    diagnostics = new Diagnostics();
     round = 0;
     submissions = 0;
+    captured = false;
+    incomplete = false;
+    diagnostics = new Diagnostics();
+    valid(g) {
+      return g === this.generation && this.state.phase !== "closed";
+    }
     stage(name, operation, stale = () => false) {
       const g = this.generation;
       return this.diagnostics.measure(name, operation, { round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
     }
-    set(phase, message2, extras = {}) {
-      const previous = this.state.phase;
-      this.state = { ...this.state, phase, message: message2, ...extras };
+    set(phase, message2, extra = {}) {
+      const from = this.state.phase;
+      this.state = { ...this.state, ...extra, phase, message: message2 };
       this.publish(this.state);
-      if (phase !== previous) this.diagnostics.record(phase === "failed" ? "error" : ["paused", "unknown"].includes(phase) ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", {
-        from: previous,
-        phase,
-        mode: this.mode,
-        taskMode: this.state.taskMode,
-        round: this.round,
-        submissions: this.submissions,
-        reason: ["failed", "paused", "unknown", "ready"].includes(phase) ? businessReason(message2) : void 0
-      });
+      if (from !== phase) this.diagnostics.record(phase === "failed" ? "error" : phase === "unknown" ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", { from, phase, round: this.round, submissions: this.submissions, reason: businessReason(message2) });
     }
-    valid(g) {
-      return g === this.generation && this.state.phase !== "closed";
-    }
-    setMode(mode) {
-      const allowed = controls(this.state, this.now());
-      if (!allowed.mode || mode === "manual" && !allowed.manual) return;
-      if (mode === "ocr" && this.mode !== "ocr") {
-        this.autoSubmitted = false;
-        this.ocrAttempts = 0;
+    bookable() {
+      const a = this.state.activity;
+      if (!a) return false;
+      if (!this.owns()) {
+        this.stop("\u9884\u7EA6\u4EFB\u52A1\u5DF2\u7531\u5176\u4ED6\u6807\u7B7E\u9875\u63A5\u7BA1");
+        return false;
       }
-      this.mode = mode;
+      if (a.reserved) {
+        this.finish("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
+        return false;
+      }
+      if (a.cancelled || this.now() + this.offset >= a.endsAt || fullCapacity(this.state)) {
+        this.stop(a.cancelled ? "\u6D3B\u52A8\u5DF2\u53D6\u6D88" : fullCapacity(this.state) ? "\u5F53\u524D\u6D3B\u52A8\u9884\u7EA6\u4EBA\u6570\u5DF2\u6EE1" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
+        return false;
+      }
+      return true;
+    }
+    finish(phase, text) {
+      clearTimeout(this.timer);
+      this.set(phase, text, { armed: false, remaining: void 0 });
+    }
+    stop(text) {
       ++this.ocrEpoch;
-      this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u65B9\u5F0F\u5207\u6362", { mode });
-      if (this.state.taskMode !== "monitor") this.scheduledMode = mode;
-      const phase = this.state.phase === "recognizing" ? "input" : this.state.phase;
-      this.set(phase, phase === "input" ? "\u8F93\u5165\u9A8C\u8BC1\u7801\u540E\u6309\u56DE\u8F66\u6216\u70B9\u51FB\u63D0\u4EA4" : this.state.message, { mode });
-      if (mode === "ocr") {
-        void this.prepareOcr();
-        if (phase === "input" && this.state.image && !this.autoSubmitted && controls(this.state, this.now()).submit) void this.recognize(this.state.image);
-      }
+      this.finish("failed", text);
     }
     async prepareOcr() {
-      if (!this.ocr) {
-        this.manual("\u672C\u5730\u8BC6\u522B\u4E0D\u53EF\u7528\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165\u9A8C\u8BC1\u7801");
-        return;
-      }
-      if (this.state.ocrStatus === "ready") return;
       const g = this.generation;
-      this.set(this.state.phase, this.state.message, { ocrStatus: "loading", ocrMessage: "\u6B63\u5728\u51C6\u5907\u672C\u5730\u8BC6\u522B \xB7 \u9996\u6B21\u4E0B\u8F7D\u7EA6 68 MB" });
+      this.set(this.state.phase, this.state.message, { ocrStatus: "loading" });
       try {
+        if (!this.ocr) throw new Error("\u672C\u5730\u8BC6\u522B\u4E0D\u53EF\u7528");
         await this.stage("OCR\u51C6\u5907\u4E0E\u9884\u70ED", () => this.ocr.prepare());
-        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "ready", ocrMessage: "\u672C\u5730\u8BC6\u522B\u5DF2\u5C31\u7EEA \xB7 \u9A8C\u8BC1\u7801\u4E0D\u4E0A\u4F20" });
+        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "ready", ocrMessage: void 0 });
       } catch (error) {
-        if (!this.valid(g)) return;
-        this.set(this.state.phase, this.state.message, { ocrStatus: "failed", ocrMessage: message(error) });
-        if (this.mode === "ocr") this.manual("OCR \u52A0\u8F7D\u5931\u8D25\uFF0C\u5DF2\u5207\u6362\u624B\u52A8\u8F93\u5165");
+        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "failed", ocrMessage: "\u8BC6\u522B\u5F15\u64CE\u4E0D\u53EF\u7528\uFF0C\u8BF7\u586B\u5199\u9A8C\u8BC1\u7801" });
       }
-    }
-    manual(text) {
-      this.diagnostics.record("warn", "\u56DE\u9000\u624B\u52A8\u8F93\u5165", { reason: this.state.ocrStatus === "failed" ? "ocr-assets-unavailable" : "ocr-unavailable" });
-      this.mode = "manual";
-      ++this.ocrEpoch;
-      this.set(this.state.phase === "recognizing" ? "input" : this.state.phase, text, { mode: "manual", manualFallback: this.state.taskMode === "monitor" });
-    }
-    inputForTask(taskMode) {
-      this.ocrAttempts = 0;
-      this.mode = taskMode === "monitor" ? "ocr" : this.scheduledMode;
-      ++this.ocrEpoch;
-      return { mode: this.mode, manualFallback: false };
-    }
-    async recognize(image) {
-      if (!this.ocr || this.mode !== "ocr" || this.autoSubmitted || !controls(this.state, this.now()).submit) return;
-      const g = this.generation, epoch = ++this.ocrEpoch;
-      ++this.ocrAttempts;
-      this.set("recognizing", "\u6B63\u5728\u672C\u5730\u8BC6\u522B\u9A8C\u8BC1\u7801\uFF1B\u53EF\u5207\u6362\u4E3A\u624B\u52A8\u8F93\u5165");
-      try {
-        const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch || this.mode !== "ocr" || this.state.image !== image)).trim();
-        if (!this.valid(g) || epoch !== this.ocrEpoch || this.mode !== "ocr" || this.state.image !== image || this.state.phase !== "recognizing") return;
-        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, attempt: this.ocrAttempts, length: code.length, valid: /^[a-z0-9]{4}$/i.test(code) });
-        if (!/^[a-z0-9]{4}$/i.test(code)) {
-          await this.retryOcr("\u672A\u8BC6\u522B\u51FA\u5B8C\u6574\u7684 4 \u4F4D\u9A8C\u8BC1\u7801");
-          return;
-        }
-        this.autoSubmitted = true;
-        this.set("input", "\u9A8C\u8BC1\u7801\u8BC6\u522B\u5B8C\u6210\uFF0C\u6B63\u5728\u63D0\u4EA4");
-        await this.submit(code);
-      } catch {
-        if (this.valid(g) && epoch === this.ocrEpoch) await this.retryOcr("\u81EA\u52A8\u8BC6\u522B\u5931\u8D25");
-      }
-    }
-    async retryOcr(reason, rejected = false) {
-      this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5", { round: this.round, attempt: this.ocrAttempts, reason: rejected ? "captcha-rejected" : "ocr-failed-or-incomplete" });
-      if (this.state.ocrStatus === "failed") {
-        this.manual(`${reason}\uFF0C\u81EA\u52A8\u5C1D\u8BD5\u5DF2\u505C\u6B62\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165`);
-        if (rejected) {
-          this.set("input", this.state.message, { image: void 0 });
-          await this.loadCaptcha();
-        }
-        return;
-      }
-      const g = this.generation;
-      this.autoSubmitted = false;
-      this.set("captcha-loading", `${reason}\uFF0C\u6B63\u5728\u68C0\u67E5\u4F59\u4F4D\u5E76\u6362\u56FE\u91CD\u8BD5\uFF08\u7B2C ${this.ocrAttempts + 1} \u6B21\uFF09`, { image: void 0 });
-      try {
-        const data = await this.stage("\u91CD\u8BD5\u4F59\u4F4D\u67E5\u8BE2", () => this.api.list());
-        if (!this.valid(g)) return;
-        const item = data.activities.find((x) => x.id === this.state.activity.id);
-        if (!item) throw new Error("\u5217\u8868\u4E2D\u672A\u627E\u5230\u8BE5\u6D3B\u52A8\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
-        this.offset = data.offset;
-        this.state = { ...this.state, activity: item, offset: this.offset, lastChecked: this.now(), full: false };
-        this.logCapacity(item);
-        if (!this.bookable()) return;
-        if (!knownCount(item)) throw new Error("\u65E0\u6CD5\u786E\u8BA4\u5269\u4F59\u4EBA\u6570\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
-        if (fullCapacity(this.state)) {
-          const continueMonitoring = this.state.taskMode === "monitor" || this.state.followUp;
-          this.offerMonitor("\u5F53\u524D\u6D3B\u52A8\u9884\u7EA6\u4EBA\u6570\u5DF2\u6EE1\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9");
-          if (continueMonitoring) this.scheduleMonitor(this.jitter(), "\u540D\u989D\u5DF2\u6EE1\uFF0C\u7EE7\u7EED\u7B49\u5F85\u7A7A\u4F59\u540D\u989D");
-          return;
-        }
-        this.set("input", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801");
-        await this.loadCaptcha();
-      } catch (error) {
-        if (this.valid(g)) this.set("failed", message(error));
-      }
-    }
-    allowed() {
-      if (this.owns()) return true;
-      this.set("failed", "\u9884\u7EA6\u4EFB\u52A1\u5DF2\u7531\u5176\u4ED6\u6807\u7B7E\u9875\u63A5\u7BA1\uFF0C\u8BF7\u5173\u95ED\u540E\u91CD\u8BD5");
-      return false;
-    }
-    wait(ms2) {
-      return new Promise((resolve) => {
-        this.wake = resolve;
-        this.timer = setTimeout(() => {
-          this.wake = void 0;
-          resolve();
-        }, ms2);
-      });
     }
     async open(id, autoStart = true) {
       const g = ++this.generation;
-      this.autoSubmitted = false;
-      this.ocrAttempts = 0;
+      this.diagnostics = new Diagnostics();
       this.round = 0;
       this.submissions = 0;
-      this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id, mode: this.mode, visibility: typeof document === "undefined" ? "unknown" : document.visibilityState });
-      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", mode: this.mode, taskMode: "scheduled", interval: 60, followUp: false };
+      this.captured = false;
+      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: 30 };
       this.publish(this.state);
-      if (this.mode === "ocr") void this.prepareOcr();
+      this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id });
+      void this.prepareOcr();
       try {
         const data = await this.stage("\u6D3B\u52A8\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
-        let item = data.activities.find((x) => x.id === id);
+        let activity2 = data.activities.find((a) => a.id === id);
         this.offset = data.offset;
-        if (!item) {
+        if (!activity2) {
           const detail = await this.stage("\u6D3B\u52A8\u8BE6\u60C5\u67E5\u8BE2", () => this.api.detail(id));
-          item = detail.activity;
+          activity2 = detail.activity;
           this.offset = detail.offset;
         }
         if (!this.valid(g)) return;
-        this.state = { ...this.state, activity: item, offset: this.offset, lastChecked: this.now() };
-        this.logCapacity(item);
-        this.diagnostics.record("log", "\u9884\u7EA6\u65F6\u95F4\u914D\u7F6E", { opensAt: new Date(item.startsAt).toISOString(), endsAt: new Date(item.endsAt).toISOString(), serverOffsetMs: this.offset });
-        if (item.reserved) {
-          this.set("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
-          return;
-        }
-        if (item.cancelled) {
-          this.set("failed", "\u6D3B\u52A8\u5DF2\u53D6\u6D88");
-          return;
-        }
-        if (this.now() + this.offset >= item.endsAt) {
-          this.set("failed", "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
-          return;
-        }
-        const full = fullCapacity(this.state);
-        const taskMode = full ? "monitor" : "scheduled";
-        this.set("ready", full ? "\u5F53\u524D\u4EBA\u6570\u5DF2\u6EE1\uFF0C\u53EF\u5F00\u542F\u4F4E\u9891\u4F59\u4F4D\u76D1\u6D4B" : "\u9009\u62E9\u9884\u7EA6\u65B9\u5F0F\u540E\u5F00\u59CB", { taskMode, ...full ? this.inputForTask("monitor") : { mode: this.mode, manualFallback: false } });
-        if (full) void this.prepareOcr();
+        this.state = { ...this.state, activity: activity2, offset: this.offset };
+        if (!this.bookable()) return;
+        this.set("ready", "");
         if (autoStart) this.start();
       } catch (error) {
-        if (this.valid(g)) this.set("failed", message(error));
+        if (this.valid(g)) this.stop(message(error));
       }
     }
-    configure(options) {
-      const allowed = controls(this.state, this.now());
-      if (options.taskMode && options.taskMode !== this.state.taskMode) {
-        if (!allowed[options.taskMode]) return;
-        this.cancelPending();
-        this.autoSubmitted = false;
-        this.diagnostics.record("log", "\u9884\u7EA6\u65B9\u5F0F\u5207\u6362", { taskMode: options.taskMode });
-        this.set("ready", "\u9009\u62E9\u9884\u7EA6\u65B9\u5F0F\u540E\u5F00\u59CB", { taskMode: options.taskMode, ...this.inputForTask(options.taskMode), image: void 0, nextCheck: void 0, remaining: void 0, checking: false, error: false, retryAt: void 0 });
-        if (this.mode === "ocr") void this.prepareOcr();
-      }
-      const current = controls(this.state, this.now());
-      const extras = {};
-      if (current.interval && options.interval && [30, 60, 120].includes(options.interval)) extras.interval = options.interval;
-      if (current.followUp && options.followUp !== void 0) extras.followUp = options.followUp;
-      if (!Object.keys(extras).length) return;
-      this.set(this.state.phase, this.state.message, extras);
-      this.diagnostics.record("log", "\u76D1\u6D4B\u8BBE\u7F6E\u4FEE\u6539", { intervalSeconds: this.state.interval, followUp: this.state.followUp, nextCheck: this.state.nextCheck });
+    configure(leadSeconds) {
+      if (this.state.phase === "ready" && [10, 20, 30, 60].includes(leadSeconds)) this.set("ready", "", { leadSeconds });
     }
     start() {
-      if (!["ready", "paused"].includes(this.state.phase) || !this.state.activity || !this.allowed()) return;
-      if (!this.bookable()) return;
-      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { taskMode: this.state.taskMode, mode: this.mode, ocrReady: this.state.ocrStatus === "ready", serverOffsetMs: this.offset });
-      if (this.state.taskMode !== "monitor" && fullCapacity(this.state)) {
-        this.offerMonitor();
+      if (!controls(this.state, this.now()).start || !this.bookable()) return;
+      this.captured = false;
+      this.set("waiting", "", { armed: true });
+      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: this.state.leadSeconds, serverOffsetMs: this.offset });
+      this.tick();
+    }
+    tick = () => {
+      clearTimeout(this.timer);
+      if (!this.state.armed || !this.bookable()) return;
+      const remaining = this.state.activity.startsAt - this.now() - this.offset;
+      this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
+      if (!this.captured && remaining <= (this.state.leadSeconds ?? 30) * 1e3) {
+        this.captured = true;
+        void this.loadCaptcha();
+      }
+      if (remaining <= 0) {
+        if (controls(this.state, this.now()).submit) void this.submit(this.state.code);
+        else if (this.incomplete) void this.retryCaptcha();
         return;
       }
-      this.failures = 0;
-      this.state = { ...this.state, error: false };
-      if (this.mode === "ocr" && this.state.ocrStatus !== "ready") void this.prepareOcr();
-      if (this.state.taskMode === "monitor") {
-        this.set("monitoring", "\u6B63\u5728\u67E5\u8BE2\u4F59\u4F4D", { checking: this.checking, retryAt: void 0 });
-        void this.checkMonitor(this.generation);
-        return;
-      }
-      const g = this.generation;
-      const tick = () => {
-        if (!this.valid(g)) return;
-        const remaining = this.state.activity.startsAt - this.now() - this.offset;
-        if (remaining <= 0) {
-          void this.loadCaptcha();
-          return;
-        }
-        this.set("waiting", "\u7B49\u5F85\u9884\u7EA6\u5F00\u653E\uFF1B\u8BF7\u4FDD\u6301\u672C\u9875\u6253\u5F00", { remaining });
-        this.timer = setTimeout(tick, Math.min(250, remaining));
-      };
-      tick();
-    }
-    pause(text = "\u76D1\u6D4B\u5DF2\u6682\u505C") {
-      if (this.state.phase !== "monitoring") return;
-      ++this.generation;
-      clearTimeout(this.timer);
-      this.set("paused", text, { nextCheck: void 0, remaining: void 0, checking: false });
-    }
-    checkNow() {
-      if (this.checking || !controls(this.state, this.now()).checkNow) return;
-      clearTimeout(this.timer);
-      this.diagnostics.record("log", "\u7ACB\u5373\u68C0\u67E5");
-      void this.checkMonitor(this.generation);
-    }
-    jitter() {
-      return (this.state.interval ?? 60) * 1e3 * (0.9 + this.random() * 0.2);
-    }
-    scheduleMonitor(delay, text, backoff = false) {
-      clearTimeout(this.timer);
-      const g = this.generation, nextCheck = this.now() + delay;
-      this.diagnostics.record(backoff ? "warn" : "log", "\u5B89\u6392\u4E0B\u6B21\u76D1\u6D4B", { delayMs: Math.round(delay), backoff, failures: this.failures });
-      const tick = () => {
-        if (!this.valid(g) || this.state.phase !== "monitoring") return;
-        if (this.now() + this.offset >= this.state.activity.endsAt) {
-          this.set("failed", "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F", { nextCheck: void 0, remaining: void 0 });
-          return;
-        }
-        const remaining = nextCheck - this.now();
-        if (remaining <= 0) {
-          void this.checkMonitor(g);
-          return;
-        }
-        this.set("monitoring", text, { nextCheck, remaining, checking: false });
-        this.timer = setTimeout(tick, Math.min(1e3, remaining));
-      };
-      this.set("monitoring", text, { image: void 0, nextCheck, checking: false, retryAt: backoff ? nextCheck : void 0 });
-      tick();
-    }
-    async checkMonitor(g) {
-      if (this.checking || !this.valid(g) || this.state.phase !== "monitoring" || !this.allowed()) return;
-      if (this.now() + this.offset >= this.state.activity.endsAt) {
-        this.set("failed", "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
-        return;
-      }
-      this.checking = true;
-      this.set("monitoring", "\u6B63\u5728\u67E5\u8BE2\u4F59\u4F4D", { checking: true, nextCheck: void 0, remaining: void 0, retryAt: void 0 });
-      try {
-        const data = await this.stage("\u76D1\u6D4B\u4F59\u4F4D\u67E5\u8BE2", () => this.api.list());
-        if (!this.valid(g) || this.state.phase !== "monitoring") return;
-        const item = data.activities.find((x) => x.id === this.state.activity.id);
-        if (!item) {
-          this.pause("\u5217\u8868\u4E2D\u672A\u627E\u5230\u8BE5\u6D3B\u52A8\uFF0C\u8BF7\u5728\u5B66\u6821\u9875\u9762\u68C0\u67E5");
-          return;
-        }
-        this.offset = data.offset;
-        this.failures = 0;
-        this.state = { ...this.state, activity: item, offset: this.offset, full: false, error: false, lastChecked: this.now(), checking: false };
-        this.logCapacity(item);
-        if (item.reserved) {
-          this.set("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
-          return;
-        }
-        if (item.cancelled) {
-          this.set("failed", "\u6D3B\u52A8\u5DF2\u53D6\u6D88");
-          return;
-        }
-        const serverNow = this.now() + this.offset;
-        if (serverNow >= item.endsAt) {
-          this.set("failed", "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
-          return;
-        }
-        if (serverNow < item.startsAt) {
-          this.scheduleMonitor(item.startsAt - serverNow, "\u7B49\u5F85\u9884\u7EA6\u5F00\u653E\u540E\u68C0\u67E5\u4F59\u4F4D");
-          return;
-        }
-        if (!knownCount(item)) {
-          this.scheduleMonitor(this.jitter(), "\u4EBA\u6570\u6570\u636E\u6682\u4E0D\u5B8C\u6574\uFF0C\u7B49\u5F85\u4E0B\u4E00\u6B21\u68C0\u67E5");
-          return;
-        }
-        if (item.count >= item.capacity) {
-          this.scheduleMonitor(this.jitter(), "\u6B63\u5728\u7B49\u5F85\u7A7A\u4F59\u540D\u989D");
-          return;
-        }
-        this.autoSubmitted = false;
-        this.ocrAttempts = 0;
-        await this.loadCaptcha();
-      } catch (error) {
-        if (!this.valid(g) || this.state.phase !== "monitoring") return;
-        if (!(error instanceof ApiError) || error.kind !== "network") {
-          this.pause(message(error));
-          return;
-        }
-        if (++this.failures >= 5) {
-          this.pause("\u8FDE\u7EED 5 \u6B21\u8FDE\u63A5\u5931\u8D25\uFF0C\u76D1\u6D4B\u5DF2\u6682\u505C");
-          return;
-        }
-        this.scheduleMonitor(Math.min(8, 2 ** this.failures) * 6e4, "\u8FDE\u63A5\u5931\u8D25\uFF0C\u7A0D\u540E\u91CD\u8BD5", true);
-      } finally {
-        this.checking = false;
-        if (g !== this.generation && this.state.phase === "monitoring" && !this.state.nextCheck) void this.checkMonitor(this.generation);
-      }
+      this.timer = setTimeout(this.tick, Math.min(250, remaining));
+    };
+    editCode(code) {
+      if (!controls(this.state, this.now()).edit) return;
+      ++this.ocrEpoch;
+      this.set("input", "", { code: code.replace(/\D/g, "").slice(0, 4) });
+      this.diagnostics.record("log", "\u4EBA\u5DE5\u4FEE\u6539\u9A8C\u8BC1\u7801");
     }
     async loadCaptcha() {
-      if (!["ready", "waiting", "monitoring", "input", "recognizing"].includes(this.state.phase)) return;
-      if (!this.state.activity || !this.allowed()) return;
-      if (!this.bookable()) return;
-      if (fullCapacity(this.state)) {
-        this.offerMonitor();
-        return;
-      }
-      if (this.now() + this.offset < this.state.activity.startsAt) return;
-      if (this.state.phase === "monitoring" && !knownCount(this.state.activity)) return;
-      const g = this.generation;
+      if (!this.state.armed || !["waiting", "input", "recognizing"].includes(this.state.phase) || !this.bookable()) return;
+      const g = this.generation, epoch = ++this.ocrEpoch;
+      this.incomplete = false;
       ++this.round;
-      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, afterOpenMs: Math.round(this.now() + this.offset - this.state.activity.startsAt), ocrReady: this.state.ocrStatus === "ready", visibility: typeof document === "undefined" ? "unknown" : document.visibilityState });
-      clearTimeout(this.timer);
-      ++this.ocrEpoch;
-      this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, nextCheck: void 0, remaining: void 0, checking: false });
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, afterOpenMs: this.now() + this.offset - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
+      this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
-        if (!this.valid(g) || !this.allowed()) return;
         try {
           const image = await this.stage("\u9A8C\u8BC1\u7801\u83B7\u53D6", () => this.api.captcha());
-          if (this.valid(g)) {
-            this.set("input", "\u8F93\u5165\u9A8C\u8BC1\u7801\u540E\u6309\u56DE\u8F66\u6216\u70B9\u51FB\u63D0\u4EA4", { image });
-            if (this.mode === "ocr") void this.recognize(image);
-          }
+          if (!this.valid(g) || epoch !== this.ocrEpoch) return;
+          this.set("input", "", { image });
+          if (this.state.ocrStatus !== "failed" && this.ocr) void this.recognize(image, epoch);
           return;
         } catch (error) {
           if (!this.valid(g)) return;
           if (!(error instanceof ApiError) || error.kind !== "network" || attempt === 2) {
-            this.set("failed", message(error));
+            this.stop(message(error));
             return;
           }
-          this.set("captcha-loading", "\u53D6\u56FE\u8FDE\u63A5\u5931\u8D25\uFF0C\u7A0D\u540E\u91CD\u8BD5");
-          this.diagnostics.record("warn", "\u53D6\u56FE\u7F51\u7EDC\u91CD\u8BD5", { attempt: attempt + 1, delayMs: (attempt + 1) * 1e3 });
           await this.wait((attempt + 1) * 1e3);
+          if (!this.valid(g)) return;
         }
       }
     }
+    async recognize(image, epoch) {
+      const g = this.generation;
+      this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801");
+      try {
+        const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch)).trim();
+        if (!this.valid(g) || epoch !== this.ocrEpoch) return;
+        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { length: code.length, valid: /^\d{4}$/.test(code) });
+        if (!/^\d{4}$/.test(code)) {
+          await this.ocrFailed();
+          return;
+        }
+        this.set("input", "", { code });
+        if (this.now() + this.offset >= this.state.activity.startsAt) await this.submit(code);
+      } catch {
+        if (this.valid(g) && epoch === this.ocrEpoch) await this.ocrFailed();
+      }
+    }
+    async ocrFailed() {
+      if (this.state.ocrStatus === "failed") {
+        this.set("input", "\u8BC6\u522B\u5F15\u64CE\u4E0D\u53EF\u7528\uFF0C\u8BF7\u586B\u5199\u9A8C\u8BC1\u7801");
+        return;
+      }
+      if (this.now() + this.offset < this.state.activity.startsAt) {
+        this.set("input", "\u8BC6\u522B\u5931\u8D25\uFF0C\u53EF\u4FEE\u6539\u9A8C\u8BC1\u7801\uFF1B\u5F00\u653E\u540E\u81EA\u52A8\u6362\u56FE\u91CD\u8BD5");
+        this.incomplete = true;
+        return;
+      }
+      await this.retryCaptcha();
+    }
+    async retryCaptcha() {
+      const g = this.generation;
+      this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5");
+      this.set("captcha-loading", "\u6B63\u5728\u68C0\u67E5\u4F59\u4F4D\u5E76\u66F4\u65B0\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
+      try {
+        const data = await this.stage("\u91CD\u8BD5\u4F59\u4F4D\u67E5\u8BE2", () => this.api.list());
+        if (!this.valid(g)) return;
+        const activity2 = data.activities.find((a) => a.id === this.state.activity.id);
+        if (!activity2 || !knownCount(activity2)) {
+          this.stop("\u65E0\u6CD5\u786E\u8BA4\u5269\u4F59\u4EBA\u6570\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
+          return;
+        }
+        this.offset = data.offset;
+        this.state = { ...this.state, activity: activity2, offset: this.offset };
+        this.diagnostics.record("log", "\u4EBA\u6570\u5FEB\u7167", { count: activity2.count, capacity: activity2.capacity });
+        if (!this.bookable()) return;
+        this.set("input", "");
+        await this.loadCaptcha();
+      } catch (error) {
+        if (this.valid(g)) this.stop(message(error));
+      }
+    }
     async submit(code) {
-      if (this.state.phase !== "input" || !this.state.activity || !this.allowed()) return;
-      if (!this.bookable()) return;
-      if (fullCapacity(this.state)) {
-        this.offerMonitor();
-        return;
-      }
-      if (!controls(this.state, this.now()).submit) return;
-      code = code.trim();
-      if (!code || code.length > 4) {
-        this.set("input", "\u8BF7\u8F93\u5165 1\u20134 \u4F4D\u9A8C\u8BC1\u7801");
-        return;
-      }
-      if (this.now() + this.offset >= this.state.activity.endsAt) {
-        this.set("failed", "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
-        return;
-      }
+      if (!controls(this.state, this.now()).submit || !this.bookable()) return;
+      code = this.state.code.trim();
+      if (!/^\d{4}$/.test(code)) return;
+      ++this.ocrEpoch;
+      clearTimeout(this.timer);
       const g = this.generation;
       ++this.submissions;
-      this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\uFF0C\u8BF7\u52FF\u91CD\u590D\u64CD\u4F5C");
+      this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
       try {
         await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
       } catch (error) {
         if (!this.valid(g)) return;
+        if (error instanceof ApiError && ["session", "rate"].includes(error.kind)) {
+          this.stop(message(error));
+          return;
+        }
         if (error instanceof ApiError && error.kind === "business") {
           if (error.message.includes("\u9A8C\u8BC1\u7801")) {
-            if (this.mode === "ocr") {
-              await this.retryOcr(error.message, true);
-              return;
-            }
-            this.set("input", error.message, { image: void 0 });
-            await this.loadCaptcha();
-            if (this.state.phase === "input") this.set("input", error.message + " \u5DF2\u66F4\u65B0\u9A8C\u8BC1\u7801");
-          } else if (error.message.includes("\u4EBA\u6570\u5DF2\u6EE1")) {
-            const continueMonitoring = this.state.taskMode === "monitor" || this.state.followUp;
-            this.offerMonitor(error.message);
-            if (continueMonitoring) this.scheduleMonitor(this.jitter(), "\u540D\u989D\u5DF2\u6EE1\uFF0C\u7EE7\u7EED\u7B49\u5F85\u7A7A\u4F59\u540D\u989D");
-          } else this.set("failed", error.message);
+            await this.retryCaptcha();
+            return;
+          }
+          this.stop(error.message);
           return;
         }
         this.diagnostics.record("warn", "\u63D0\u4EA4\u7ED3\u679C\u4E0D\u660E\uFF0C\u8F6C\u5165\u6838\u9A8C", errorInfo(error));
       }
       if (this.valid(g)) await this.verify();
+    }
+    wait(ms2) {
+      return new Promise((resolve) => {
+        this.wake = resolve;
+        this.retryTimer = setTimeout(() => {
+          this.wake = void 0;
+          resolve();
+        }, ms2);
+      });
     }
     async verify() {
       if (!this.state.activity || !["submitting", "unknown", "verifying"].includes(this.state.phase)) return;
@@ -696,7 +498,7 @@ SOFTWARE.
           const booked = await this.stage("\u9884\u7EA6\u8BB0\u5F55\u6838\u9A8C", () => this.api.booked(this.state.activity.id));
           this.diagnostics.record("log", "\u6838\u9A8C\u7ED3\u679C", { attempt: attempt + 1, booked });
           if (booked) {
-            if (this.valid(g)) this.set("success", "\u9884\u7EA6\u6210\u529F\uFF0C\u5DF2\u6838\u9A8C\u9884\u7EA6\u8BB0\u5F55", { activity: { ...this.state.activity, reserved: true } });
+            if (this.valid(g)) this.set("success", "\u9884\u7EA6\u6210\u529F\uFF0C\u5DF2\u6838\u9A8C\u9884\u7EA6\u8BB0\u5F55", { armed: false, remaining: void 0, activity: { ...this.state.activity, reserved: true } });
             return;
           }
           detail = "\u6682\u672A\u67E5\u5230\u9884\u7EA6\u8BB0\u5F55";
@@ -705,52 +507,17 @@ SOFTWARE.
           if (error instanceof ApiError && ["session", "rate"].includes(error.kind)) break;
         }
       }
-      if (this.valid(g)) this.set("unknown", "\u7ED3\u679C\u5F85\u786E\u8BA4\uFF1A" + detail + "\u3002\u8BF7\u91CD\u65B0\u6838\u9A8C\uFF0C\u4E0D\u8981\u76F4\u63A5\u91CD\u590D\u63D0\u4EA4\u3002");
+      if (this.valid(g)) this.finish("unknown", "\u7ED3\u679C\u5F85\u786E\u8BA4\uFF1A" + detail + "\u3002\u8BF7\u91CD\u65B0\u6838\u9A8C\uFF0C\u4E0D\u8981\u76F4\u63A5\u91CD\u590D\u63D0\u4EA4\u3002");
     }
-    bookable() {
-      const item = this.state.activity;
-      if (!item) return false;
-      if (item.reserved) {
-        this.set("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55", { image: void 0 });
-        return false;
-      }
-      if (item.cancelled || this.now() + this.offset >= item.endsAt) {
-        this.set("failed", item.cancelled ? "\u6D3B\u52A8\u5DF2\u53D6\u6D88" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F", { image: void 0 });
-        return false;
-      }
-      return true;
-    }
-    logCapacity(item) {
-      this.diagnostics.record("log", "\u4EBA\u6570\u5FEB\u7167", { countKnown: knownCount(item), count: knownCount(item) ? item.count : void 0, capacity: item.capacity, reserved: item.reserved, cancelled: item.cancelled, serverOffsetMs: this.offset });
-    }
-    offerMonitor(error) {
-      this.diagnostics.record("warn", "\u6EE1\u5458\uFF0C\u505C\u6B62\u8FDE\u7EED\u9884\u7EA6", { followUp: this.state.followUp, taskMode: this.state.taskMode, round: this.round });
-      this.cancelPending();
-      this.set("ready", error ?? "\u9009\u62E9\u9884\u7EA6\u65B9\u5F0F\u540E\u5F00\u59CB", {
-        taskMode: "monitor",
-        ...this.inputForTask("monitor"),
-        full: true,
-        error: Boolean(error),
-        image: void 0,
-        nextCheck: void 0,
-        remaining: void 0,
-        checking: false,
-        retryAt: void 0,
-        activity: error && this.state.activity ? { ...this.state.activity, countKnown: false } : this.state.activity
-      });
-      void this.prepareOcr();
-    }
-    cancelPending() {
+    close() {
+      if (!controls(this.state, this.now()).close) return false;
       ++this.generation;
       ++this.ocrEpoch;
       clearTimeout(this.timer);
+      clearTimeout(this.retryTimer);
       this.wake?.();
       this.wake = void 0;
-    }
-    close() {
-      if (["submitting", "verifying"].includes(this.state.phase)) return false;
-      this.cancelPending();
-      this.set("closed", "");
+      this.set("closed", "", { armed: false });
       return true;
     }
   };
@@ -767,265 +534,82 @@ SOFTWARE.
     host = document.createElement("div");
     root = this.host.attachShadow({ mode: "open" });
     panel;
-    title;
-    info;
-    status;
-    clock;
-    image;
-    input;
-    submit;
-    refresh;
-    verify;
-    reload;
-    close;
-    modes;
-    preparation;
-    modeHint;
-    capacity;
-    checked;
-    taskModes;
-    interval;
-    followUp;
-    start;
-    pause;
-    shrink;
-    checkNow;
-    lastPhase;
     lastImage;
     constructor(actions) {
       this.host.id = "seu-lecture-helper-dialog";
       this.root.innerHTML = `<style>
 :host{all:initial;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#18251e}
-dialog{box-sizing:border-box;width:min(680px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow-y:auto;border:1px solid #e4ebe6;border-radius:18px;padding:24px;box-shadow:0 24px 80px #10251c30;color:inherit;background:#fff}
-dialog::backdrop{background:#10251c80}
-h2{font-size:18px;line-height:1.45;margin:0 0 8px;overflow-wrap:anywhere}
-p{font-size:14px;line-height:1.5;margin:0;overflow-wrap:anywhere}
-#info{display:none}.controls{margin-top:16px}
-.controls{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:14px}
-fieldset{min-width:0;border:0;padding:0;margin:0}
-.sr-only,legend,#clock-label,#mode-hint,#checked,#monitor-options>label{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip-path:inset(50%)!important;white-space:nowrap!important;border:0!important}
-.segments{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:4px;border-radius:11px;background:#f0f3f1}
-.segments label{position:relative;cursor:pointer}
-.segments input{position:absolute;opacity:0;width:1px;height:1px}
-.segments span{display:flex;align-items:center;justify-content:center;gap:6px;min-height:36px;border-radius:8px;font-size:14px;color:#6a786f;transition:background .15s,color .15s,box-shadow .15s}
-.segments input:checked+span{background:#fff;color:#24663b;box-shadow:0 1px 5px #1c3e2a16;font-weight:600}
-.segments input:focus-visible+span{outline:2px solid #287547;outline-offset:2px}
-.segments input:disabled+span{opacity:.6;cursor:default}
-.segments svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
-.overview{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:14px 16px;border-radius:12px;background:#f0f7f2}
-.summary{min-width:0}#capacity{font-size:14px;color:#287547}#checked{font-size:12px;color:#68776e;margin-top:4px}
-.clock{font-size:32px;line-height:1.2;font-variant-numeric:tabular-nums;font-weight:650;letter-spacing:1px;color:#287547;white-space:nowrap}
-#status:not(.sr-only){margin-top:12px}
-.preferences{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px 20px;margin-top:12px}
-.preferences:not(:has(>:not([hidden]))){display:none}
-#monitor-options{display:flex;align-items:center;gap:8px;font-size:12px;color:#68776e}
-select{font:inherit;color:#24663b;background:#f5f8f6;border:1px solid #d5e0d8;border-radius:7px;padding:5px 8px}
-#follow-option{display:flex;align-items:center;gap:6px;font-size:12px;color:#68776e}
-#follow-option input{accent-color:#287547;width:15px;height:15px;margin:0}
-#preparation{font-size:12px;display:flex;align-items:center;gap:6px;color:#287547;margin-top:10px}
-#preparation[data-status=failed]{color:#9c5530}
-#preparation[data-status=loading]::before{content:"";width:9px;height:9px;flex:none;border:2px solid #d4e3d8;border-top-color:#287547;border-radius:50%;animation:spin 1s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-form{margin-top:16px}
-.challenge{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;align-items:center;padding:12px 16px;background:#f7f9f7;border-radius:12px}
-img{width:140px;max-width:100%;height:auto;max-height:72px;object-fit:contain;justify-self:center;background:#fff;border:1px solid #e0e6e2;border-radius:5px}
-.challenge label{font-size:12px;color:#68776e}
-.challenge input{display:block;box-sizing:border-box;margin-top:4px;width:100%;max-width:180px;min-height:42px;border:1px solid #b2c2b7;border-radius:8px;padding:7px 9px;font:22px system-ui;letter-spacing:3px;color:#18251e;background:#fff}
-.challenge input:focus{outline:2px solid #287547;outline-offset:2px}
-button{font:14px system-ui;cursor:pointer;min-height:38px;padding:7px 13px;border-radius:8px;border:1px solid #ccd8cf;background:#fff;color:#203e2d}
-button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:white;border-color:#287547}
-.actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.challenge:not([hidden])+.actions{margin-top:14px}
-.task-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
-[hidden]{display:none!important}
-@media(max-width:520px){dialog{padding:20px}.controls{grid-template-columns:1fr;gap:8px}.overview{gap:12px;padding:12px}.clock{font-size:27px}#capacity{font-size:13px}.challenge{gap:12px;padding:12px}}
-@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="info"></p><p id="status" role="status" aria-live="polite"></p><p class="clock" hidden></p><fieldset><legend>\u9A8C\u8BC1\u7801\u65B9\u5F0F</legend><div class="segments"><label><input type="radio" name="mode" value="ocr"><span><svg aria-hidden="true" viewBox="0 0 20 20"><rect x="5" y="5" width="10" height="10" rx="2"/><path d="M8 2v3m4-3v3M8 15v3m4-3v3M2 8h3m-3 4h3m10-4h3m-3 4h3"/></svg>\u81EA\u52A8\u8BC6\u522B</span></label><label><input type="radio" name="mode" value="manual"><span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m4 13 9-9 3 3-9 9-4 1 1-4Zm7-7 3 3"/></svg>\u624B\u52A8\u8F93\u5165</span></label></div></fieldset><p id="mode-hint"></p><p id="preparation" aria-live="polite" hidden></p><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><label><span class="sr-only">\u9A8C\u8BC1\u7801</span><input placeholder="\u9A8C\u8BC1\u7801" aria-label="\u9A8C\u8BC1\u7801" maxlength="4" autocomplete="off" spellcheck="false"></label></div><div class="actions"><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
-      const get = (selector) => this.root.querySelector(selector);
-      this.panel = get("dialog");
-      this.title = get("#title");
-      this.info = get("#info");
-      this.status = get("#status");
-      this.clock = get(".clock");
-      this.image = get("img");
-      this.input = get('input[aria-label="\u9A8C\u8BC1\u7801"]');
-      this.submit = get("[type=submit]");
-      this.refresh = get("#refresh");
-      this.verify = get("#verify");
-      this.close = get("#close");
-      this.modes = [...this.root.querySelectorAll("[name=mode]")];
-      this.preparation = get("#preparation");
-      this.modeHint = get("#mode-hint");
-      this.capacity = document.createElement("p");
-      this.capacity.id = "capacity";
-      this.info.after(this.capacity);
-      const taskOptions = document.createElement("fieldset");
-      taskOptions.innerHTML = `<legend>\u9884\u7EA6\u65B9\u5F0F</legend><div class="segments"><label><input type="radio" name="task-mode" value="scheduled"><span>\u5B9A\u65F6\u9884\u7EA6</span></label><label><input type="radio" name="task-mode" value="monitor"><span>\u4F59\u4F4D\u76D1\u6D4B</span></label></div>`;
-      this.status.before(taskOptions);
-      this.taskModes = [...taskOptions.querySelectorAll("input")];
-      this.taskModes.forEach((input) => input.onchange = () => {
-        if (input.checked) actions.configure?.({ taskMode: input.value });
+*{box-sizing:border-box}dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}dialog::backdrop{background:#10251c80}
+h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
+.challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}input{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}input:focus{outline:2px solid #287547;outline-offset:2px}
+p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}#hide{margin-left:auto}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}input{font-size:24px;letter-spacing:4px}}
+</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
+      this.panel = this.get("dialog");
+      this.get("form").addEventListener("submit", (e) => {
+        e.preventDefault();
+        actions.submit(this.get("input").value);
       });
-      this.checked = document.createElement("p");
-      this.checked.id = "checked";
-      this.clock.after(this.checked);
-      const clockLabel = document.createElement("p");
-      clockLabel.id = "clock-label";
-      clockLabel.hidden = true;
-      this.clock.before(clockLabel);
-      const options = document.createElement("div");
-      options.id = "monitor-options";
-      options.innerHTML = `<label for="interval">\u68C0\u67E5\u95F4\u9694</label><select id="interval" aria-label="\u68C0\u67E5\u95F4\u9694"><option value="30">\u6BCF 30 \u79D2</option><option value="60">\u6BCF 60 \u79D2</option><option value="120">\u6BCF 120 \u79D2</option></select>`;
-      this.checked.after(options);
-      this.interval = get("#interval");
-      this.interval.onchange = () => actions.configure?.({ interval: Number(this.interval.value) });
-      const follow = document.createElement("label");
-      follow.id = "follow-option";
-      follow.innerHTML = `<input type="checkbox" id="follow-up">\u672A\u62A2\u5230\u65F6\u7EE7\u7EED\u76D1\u6D4B\u4F59\u4F4D`;
-      options.after(follow);
-      this.followUp = get("#follow-up");
-      this.followUp.onchange = () => actions.configure?.({ followUp: this.followUp.checked });
-      const button = (id, text, action) => {
-        const b = document.createElement("button");
-        b.id = id;
-        b.type = "button";
-        b.textContent = text;
-        b.hidden = true;
-        b.onclick = action;
-        this.close.before(b);
-        return b;
-      };
-      this.start = button("start", "\u5F00\u59CB\u7B49\u5F85", () => actions.start?.());
-      this.start.className = "primary";
-      this.pause = button("pause", "\u6682\u505C\u76D1\u6D4B", () => actions.pause?.());
-      this.shrink = button("shrink", "\u6536\u8D77", () => actions.hide?.());
-      this.reload = document.createElement("button");
-      this.reload.type = "button";
-      this.reload.id = "reload";
-      this.reload.textContent = "\u5237\u65B0\u5B66\u6821\u9875\u9762";
-      this.reload.hidden = true;
-      const controls2 = document.createElement("div");
-      controls2.className = "controls";
-      controls2.append(taskOptions, this.modes[0].closest("fieldset"));
-      const overview = document.createElement("div");
-      overview.className = "overview";
-      const summary = document.createElement("div");
-      summary.className = "summary";
-      summary.append(this.capacity, this.checked);
-      const countdown = document.createElement("div");
-      countdown.append(clockLabel, this.clock);
-      overview.append(summary, countdown);
-      const preferences = document.createElement("div");
-      preferences.className = "preferences";
-      preferences.append(follow, options);
-      this.info.after(controls2, overview, this.status, preferences, this.modeHint, this.preparation);
-      this.reload.title = "\u91CD\u65B0\u52A0\u8F7D\u5B66\u6821\u9875\u9762\uFF0C\u4F7F\u539F\u9884\u7EA6\u6309\u94AE\u4E0E\u670D\u52A1\u5668\u72B6\u6001\u540C\u6B65";
-      this.close.before(this.reload);
-      this.reload.onclick = () => actions.reload?.();
-      this.checkNow = button("check-now", "\u7ACB\u5373\u68C0\u67E5", () => actions.checkNow?.());
-      const taskActions = document.createElement("div");
-      taskActions.className = "task-actions";
-      this.close.before(taskActions);
-      taskActions.append(this.checkNow, this.close);
-      this.modes.forEach((input) => input.onchange = () => {
-        if (input.checked) actions.mode?.(input.value);
-      });
-      get("form").addEventListener("submit", (event) => {
-        event.preventDefault();
-        if (!this.submit.disabled && !this.submit.hidden) actions.submit(this.input.value);
-      });
-      this.input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && event.isComposing) event.preventDefault();
-      });
-      this.refresh.onclick = () => actions.refresh();
-      this.verify.onclick = () => actions.verify();
-      this.close.onclick = () => actions.close();
-      this.panel.addEventListener("cancel", (event) => {
-        event.preventDefault();
+      this.get("input").addEventListener("input", () => actions.edit(this.get("input").value));
+      this.get("#lead").addEventListener("change", () => actions.configure(Number(this.get("#lead").value)));
+      for (const id of ["start", "refresh", "verify", "reload", "hide", "close"]) this.get("#" + id).addEventListener("click", () => actions[id]());
+      this.panel.addEventListener("cancel", (e) => {
+        e.preventDefault();
         actions.close();
       });
       document.body.append(this.host);
-      this.panel.showModal();
+      this.show();
     }
-    render(state) {
-      const { activity: activity2, phase } = state;
-      const allowed = controls(state);
-      if (!this.panel.open && !["waiting", "monitoring", "paused", "ready", "closed"].includes(phase)) this.show();
-      this.title.textContent = activity2?.title ?? "\u8BB2\u5EA7\u9884\u7EA6";
-      this.info.textContent = activity2 ? `${activity2.category} \xB7 ${activity2.place}
-\u5F00\u653E\u65F6\u95F4\uFF1A${new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(activity2.startsAt)}` : "";
-      this.info.style.whiteSpace = "pre-line";
-      this.status.textContent = state.message;
-      const routine = ["ready", "waiting", "recognizing", "captcha-loading"].includes(phase) || phase === "input" && state.message.startsWith("\u8F93\u5165\u9A8C\u8BC1\u7801") || phase === "paused" && state.message === "\u76D1\u6D4B\u5DF2\u6682\u505C" || phase === "monitoring" && (state.checking || state.message === "\u6B63\u5728\u7B49\u5F85\u7A7A\u4F59\u540D\u989D" || state.message.startsWith("\u7B49\u5F85\u9884\u7EA6\u5F00\u653E") || state.message.startsWith("\u540D\u989D\u5DF2\u6EE1"));
-      this.status.className = routine && !state.error ? "sr-only" : "";
-      const monitor = state.taskMode === "monitor";
-      this.capacity.hidden = !activity2;
-      this.capacity.textContent = activity2 ? knownCount(activity2) ? `${activity2.count} / ${activity2.capacity}` : "\u2014 / \u2014" : "";
-      this.taskModes.forEach((input) => {
-        input.checked = input.value === (state.taskMode ?? "scheduled");
-        input.disabled = !allowed[input.value];
-      });
-      this.interval.value = String(state.interval ?? 60);
-      this.interval.disabled = !allowed.interval;
-      this.root.querySelector("#monitor-options").hidden = !monitor && !state.followUp;
-      this.followUp.checked = Boolean(state.followUp);
-      this.followUp.disabled = !allowed.followUp;
-      this.root.querySelector("#follow-option").hidden = monitor || !["ready", "waiting"].includes(phase);
-      this.clock.hidden = phase !== "waiting" && !(phase === "monitoring" && state.nextCheck);
-      this.clock.textContent = duration(state.remaining ?? 0);
-      this.clock.setAttribute("aria-label", monitor ? "\u8DDD\u79BB\u4E0B\u6B21\u68C0\u67E5" : "\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E");
-      const clockLabel = this.root.querySelector("#clock-label");
-      clockLabel.hidden = this.clock.hidden;
-      clockLabel.textContent = monitor ? "\u4E0B\u6B21\u68C0\u67E5\u5012\u8BA1\u65F6" : "\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E";
-      this.checked.hidden = !monitor;
-      this.checked.textContent = state.lastChecked ? `\u4E0A\u6B21\u68C0\u67E5 ${new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(state.lastChecked)}` : "\u5C1A\u672A\u68C0\u67E5";
-      this.start.hidden = !["ready", "paused"].includes(phase);
-      this.start.disabled = !allowed.start;
-      this.start.textContent = phase === "paused" ? "\u7EE7\u7EED\u76D1\u6D4B" : monitor ? "\u5F00\u59CB\u76D1\u6D4B" : activity2 && activity2.startsAt <= Date.now() + (state.offset ?? 0) ? "\u7ACB\u5373\u9884\u7EA6" : "\u5F00\u59CB\u7B49\u5F85";
-      this.pause.hidden = phase !== "monitoring";
-      this.shrink.hidden = !["waiting", "monitoring"].includes(phase);
-      this.checkNow.hidden = !monitor || phase !== "monitoring";
-      this.checkNow.disabled = !allowed.checkNow;
-      this.checkNow.setAttribute("aria-busy", String(Boolean(state.checking)));
-      this.close.textContent = monitor && ["monitoring", "paused"].includes(phase) ? "\u505C\u6B62\u76D1\u6D4B" : "\u5173\u95ED";
-      const mode = state.mode ?? "manual";
-      this.modes.forEach((input) => {
-        input.checked = input.value === mode;
-        input.disabled = input.value === "manual" ? !allowed.manual : !allowed.mode;
-      });
-      this.modeHint.textContent = mode === "ocr" ? "\u672C\u5730\u8BC6\u522B\u540E\u81EA\u52A8\u63D0\u4EA4\uFF1B\u5F02\u5E38\u65F6\u8F6C\u4E3A\u624B\u52A8\u8F93\u5165\u3002" : "\u81EA\u884C\u8F93\u5165\u9A8C\u8BC1\u7801\uFF0C\u6309\u56DE\u8F66\u6216\u70B9\u51FB\u6309\u94AE\u63D0\u4EA4\u3002";
-      this.preparation.hidden = state.ocrStatus !== "failed";
-      this.preparation.dataset.status = state.ocrStatus ?? "";
-      this.preparation.textContent = state.ocrStatus === "ready" ? "OCR \u5DF2\u5C31\u7EEA" : state.ocrMessage ?? "";
-      const editable = allowed.submit;
-      this.root.querySelector(".challenge").hidden = !state.image || !["input", "recognizing"].includes(phase);
-      this.submit.hidden = !editable;
-      this.submit.disabled = !editable;
-      this.input.disabled = !editable;
-      this.refresh.hidden = !editable;
-      this.refresh.textContent = phase === "failed" ? "\u91CD\u65B0\u83B7\u53D6\u9A8C\u8BC1\u7801" : "\u6362\u4E00\u5F20";
-      this.verify.hidden = phase !== "unknown";
-      this.reload.hidden = phase !== "success";
-      this.close.disabled = phase === "submitting" || phase === "verifying";
-      this.close.title = this.close.disabled ? "\u63D0\u4EA4\u548C\u6838\u9A8C\u5B8C\u6210\u540E\u53EF\u5173\u95ED\uFF1B\u5173\u95ED\u4E0D\u80FD\u64A4\u9500\u9884\u7EA6" : "";
-      const changedImage = state.image !== this.lastImage;
-      if (changedImage) {
-        this.lastImage = state.image;
-        this.input.value = "";
-        if (state.image) this.image.src = state.image;
-        else this.image.removeAttribute("src");
-      }
-      if (editable && (changedImage || this.lastPhase !== "input")) this.input.focus();
-      this.lastPhase = phase;
-    }
-    hide() {
-      this.panel.close();
+    get(selector) {
+      return this.root.querySelector(selector);
     }
     show() {
       if (!this.panel.open) this.panel.showModal();
     }
+    hide() {
+      this.panel.close();
+    }
     destroy() {
       this.panel.close();
       this.host.remove();
+    }
+    render(state) {
+      const allowed = controls(state);
+      this.get("#title").textContent = state.activity?.title ?? "\u8BB2\u5EA7\u9884\u7EA6";
+      this.get("#status").textContent = state.message;
+      this.get("#status").hidden = !state.message;
+      this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "input"].includes(state.phase);
+      this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? Date.now()) - Date.now() - (state.offset ?? 0)));
+      const lead = this.get("#lead");
+      lead.value = String(state.leadSeconds ?? 30);
+      lead.disabled = state.phase !== "ready";
+      this.get(".challenge").hidden = !state.image || ["success", "failed", "unknown"].includes(state.phase);
+      const image = this.get("img"), input = this.get("input");
+      const changed = state.image !== this.lastImage;
+      if (state.image !== this.lastImage) {
+        this.lastImage = state.image;
+        if (state.image) {
+          image.src = state.image;
+          this.show();
+        } else image.removeAttribute("src");
+      }
+      if (input.value !== (state.code ?? "")) input.value = state.code ?? "";
+      input.disabled = !allowed.edit;
+      if (changed && state.image && allowed.edit) input.focus();
+      this.host.dataset.ocr = state.ocrStatus;
+      this.get("#start").hidden = state.phase !== "ready";
+      this.get("#start").disabled = !allowed.start;
+      this.get("#start").textContent = (state.activity?.startsAt ?? 0) > Date.now() + (state.offset ?? 0) ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
+      this.get("[type=submit]").hidden = !state.image || (state.remaining ?? 0) > 0;
+      this.get("[type=submit]").disabled = !allowed.submit;
+      this.get("#refresh").hidden = !state.image;
+      this.get("#refresh").disabled = !allowed.refresh;
+      this.get("#verify").hidden = state.phase !== "unknown";
+      this.get("#reload").hidden = state.phase !== "success";
+      this.get("#hide").hidden = !state.armed || ["submitting", "verifying"].includes(state.phase);
+      this.get("#close").disabled = !allowed.close;
+      this.get("#preparation").hidden = state.ocrStatus !== "failed";
+      this.get("#preparation").textContent = state.ocrMessage ?? "";
+      if (["success", "failed", "unknown"].includes(state.phase)) this.show();
     }
   };
 
@@ -3922,20 +3506,6 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
   }
 
   // src/ocr.ts
-  var MODE_KEY = "seu-lecture-helper-input-mode";
-  function savedMode() {
-    try {
-      return localStorage.getItem(MODE_KEY) === "manual" ? "manual" : "ocr";
-    } catch {
-      return "ocr";
-    }
-  }
-  function saveMode(mode) {
-    try {
-      localStorage.setItem(MODE_KEY, mode);
-    } catch {
-    }
-  }
   function decodeCtc(data, dims, charset, digitsOnly = false) {
     if (dims.length !== 3 || dims[1] !== 1 || dims[2] !== charset.length) throw new Error("OCR \u6A21\u578B\u8F93\u51FA\u683C\u5F0F\u4E0D\u5339\u914D");
     const allowed = charset.map((char, index) => index === 0 || !digitsOnly || /^[0-9]$/.test(char));
@@ -4049,14 +3619,15 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
         }
         const task = new Reservation(api, (state) => {
           if (state.activity && state.phase !== "closed") mount.setReserved(state.activity.id, state.activity.reserved);
-          const label = state.phase === "monitoring" ? "\u76D1\u6D4B\u4E2D" : state.phase === "paused" ? "\u5DF2\u6682\u505C" : state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : ["captcha-loading", "recognizing", "input", "submitting", "verifying"].includes(state.phase) ? "\u9884\u7EA6\u4E2D" : "";
+          const label = state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : ["captcha-loading", "recognizing", "input", "submitting", "verifying"].includes(state.phase) ? "\u9884\u7EA6\u4E2D" : "";
           mount.setActive(label ? state.activity?.id : void 0, label);
           current?.dialog.render(state);
-        }, Date.now, () => true, ocr, savedMode());
+        }, Date.now, () => true, ocr);
         const dialog = new Dialog({
           submit: (code) => {
             void task.submit(code);
           },
+          edit: (code) => task.editCode(code),
           refresh: () => {
             void task.loadCaptcha();
           },
@@ -4064,15 +3635,9 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
             void task.verify();
           },
           close,
-          mode: (mode) => {
-            task.setMode(mode);
-            if (task.state.taskMode !== "monitor") saveMode(task.state.mode);
-          },
           reload: () => location.reload(),
           start: () => task.start(),
-          pause: () => task.pause(),
-          checkNow: () => task.checkNow(),
-          configure: (options) => task.configure(options),
+          configure: (seconds) => task.configure(seconds),
           hide: () => dialog.hide()
         });
         current = { task, dialog, release };

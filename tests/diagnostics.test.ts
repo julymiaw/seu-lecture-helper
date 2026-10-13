@@ -34,7 +34,7 @@ it('traces a complete reservation without exposing captcha data', async () => {
   const api = await mockApi(); const task = new Reservation(api, vi.fn(), () => NOW);
   await task.open((await sample()).id);
   for (let i = 0; i < 8; i++) await Promise.resolve();
-  await task.submit('0733');
+  task.editCode('0733'); await task.submit('0733');
   const logs = vi.mocked(console.log).mock.calls.map(call => call[1]);
   expect(logs.map(row => row.event)).toEqual(expect.arrayContaining(['验证码获取开始','验证码获取完成','预约提交开始','预约提交完成','预约记录核验完成','核验结果']));
   expect(logs.find(row => row.phase === 'success')).toMatchObject({round:1, submissions:1});
@@ -49,6 +49,7 @@ it('does not log each countdown tick', async () => {
   const a = {...await sample(), reserved:false, startsAt:NOW+10000};
   const api = await mockApi({list:vi.fn(async () => ({activities:[a], offset:0}))});
   const task = new Reservation(api,vi.fn()); await task.open(a.id);
+  for(let i=0;i<10;i++)await Promise.resolve();
   const before = vi.mocked(console.log).mock.calls.length;
   await vi.advanceTimersByTimeAsync(3000);
   expect(vi.mocked(console.log).mock.calls).toHaveLength(before);

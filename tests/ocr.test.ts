@@ -1,6 +1,6 @@
 import {describe, expect, it, vi} from 'vitest';
 import {webcrypto} from 'node:crypto';
-import {decodeCtc, savedMode, saveMode} from '../src/ocr';
+import {decodeCtc} from '../src/ocr';
 import {loadAsset, validAsset, type Asset} from '../src/ocr-assets';
 
 describe('OCR output and preference', () => {
@@ -17,11 +17,7 @@ describe('OCR output and preference', () => {
     expect(decodeCtc(data,[tokens.length,1,4],charset)).toBe('0011A');
     expect(()=>decodeCtc(data,[2,2,4],charset)).toThrow('格式');
   });
-  it('defaults to OCR and only persists the selected mode', () => {
-    const values=new Map<string,string>();
-    vi.stubGlobal('localStorage',{getItem:(key:string)=>values.get(key)??null,setItem:(key:string,value:string)=>values.set(key,value)});
-    expect(savedMode()).toBe('ocr'); saveMode('manual'); expect(savedMode()).toBe('manual'); expect(values.size).toBe(1);
-  });
+
 });
 
 describe('pinned OCR asset loading', () => {
