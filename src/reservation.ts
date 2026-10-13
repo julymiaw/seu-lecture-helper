@@ -1,5 +1,6 @@
 import {ApiError, type Activity, type ReservationApi} from './api';
 import type {InputMode, OcrEngine} from './ocr';
+import {Diagnostics, businessReason, errorInfo} from './diagnostics';
 export type TaskMode = 'scheduled' | 'monitor';
 export type Phase = 'loading' | 'ready' | 'waiting' | 'monitoring' | 'paused' | 'captcha-loading' | 'recognizing' | 'input' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
 export interface State {phase: Phase; activity?: Activity; message: string; remaining?: number; image?: string; mode?: InputMode; ocrStatus?: 'loading' | 'ready' | 'failed'; ocrMessage?: string;
@@ -40,9 +41,21 @@ export class Reservation {
   private scheduledMode: InputMode;
   private checking = false;
   private failures = 0;
+  private diagnostics = new Diagnostics();
+  private round = 0;
+  private submissions = 0;
+  private stage<T>(name: string, operation: () => Promise<T>, stale = () => false) {
+    const g = this.generation;
+    return this.diagnostics.measure(name, operation, {round: this.round, submissions: this.submissions}, () => !this.valid(g) || stale());
+  }
   constructor(private api: ReservationApi, private publish: (state: State) => void, private now = Date.now, private owns = () => true, private ocr?: OcrEngine, mode: InputMode = 'manual', private random = Math.random) {this.mode = mode; this.scheduledMode = mode;}
   private set(phase: Phase, message: string, extras: Partial<State> = {}) {
+    const previous = this.state.phase;
     this.state = {...this.state, phase, message, ...extras}; this.publish(this.state);
+    if (phase !== previous) this.diagnostics.record(phase === 'failed' ? 'error' : ['paused', 'unknown'].includes(phase) ? 'warn' : 'log', '状态变化', {
+      from: previous, phase, mode: this.mode, taskMode: this.state.taskMode, round: this.round, submissions: this.submissions,
+      reason: ['failed', 'paused', 'unknown', 'ready'].includes(phase) ? businessReason(message) : undefined,
+    });
   }
   private valid(g: number) { return g === this.generation && this.state.phase !== 'closed'; }
   setMode(mode: InputMode) {
@@ -50,6 +63,7 @@ export class Reservation {
     if (!allowed.mode || mode === 'manual' && !allowed.manual) return;
     if (mode === 'ocr' && this.mode !== 'ocr') {this.autoSubmitted = false; this.ocrAttempts = 0;}
     this.mode = mode; ++this.ocrEpoch;
+    this.diagnostics.record('log', '验证码方式切换', {mode});
     if (this.state.taskMode !== 'monitor') this.scheduledMode = mode;
     const phase = this.state.phase === 'recognizing' ? 'input' : this.state.phase;
     this.set(phase, phase === 'input' ? '输入验证码后按回车或点击提交' : this.state.message, {mode});
@@ -64,7 +78,7 @@ export class Reservation {
     const g = this.generation;
     this.set(this.state.phase, this.state.message, {ocrStatus: 'loading', ocrMessage: '正在准备本地识别 · 首次下载约 68 MB'});
     try {
-      await this.ocr.prepare();
+      await this.stage('OCR准备与预热', () => this.ocr!.prepare());
       if (this.valid(g)) this.set(this.state.phase, this.state.message, {ocrStatus: 'ready', ocrMessage: '本地识别已就绪 · 验证码不上传'});
     } catch (error) {
       if (!this.valid(g)) return;
@@ -73,6 +87,7 @@ export class Reservation {
     }
   }
   private manual(text: string) {
+    this.diagnostics.record('warn', '回退手动输入', {reason: this.state.ocrStatus === 'failed' ? 'ocr-assets-unavailable' : 'ocr-unavailable'});
     this.mode = 'manual'; ++this.ocrEpoch;
     this.set(this.state.phase === 'recognizing' ? 'input' : this.state.phase, text, {mode: 'manual', manualFallback: this.state.taskMode === 'monitor'});
   }
@@ -87,8 +102,9 @@ export class Reservation {
     ++this.ocrAttempts;
     this.set('recognizing', '正在本地识别验证码；可切换为手动输入');
     try {
-      const code = (await this.ocr.recognize(image)).trim();
+      const code = (await this.stage('OCR识别', () => this.ocr!.recognize(image), () => epoch !== this.ocrEpoch || this.mode !== 'ocr' || this.state.image !== image)).trim();
       if (!this.valid(g) || epoch !== this.ocrEpoch || this.mode !== 'ocr' || this.state.image !== image || this.state.phase !== 'recognizing') return;
+      this.diagnostics.record('log', 'OCR输出检查', {round: this.round, attempt: this.ocrAttempts, length: code.length, valid: /^[a-z0-9]{4}$/i.test(code)});
       if (!/^[a-z0-9]{4}$/i.test(code)) {await this.retryOcr('未识别出完整的 4 位验证码'); return;}
       this.autoSubmitted = true;
       this.set('input', '验证码识别完成，正在提交');
@@ -98,6 +114,7 @@ export class Reservation {
     }
   }
   private async retryOcr(reason: string, rejected = false) {
+    this.diagnostics.record('warn', '验证码重试', {round: this.round, attempt: this.ocrAttempts, reason: rejected ? 'captcha-rejected' : 'ocr-failed-or-incomplete'});
     if (this.state.ocrStatus === 'failed') {
       this.manual(`${reason}，自动尝试已停止，请手动输入`);
       if (rejected) {this.set('input', this.state.message, {image: undefined}); await this.loadCaptcha();}
@@ -107,12 +124,13 @@ export class Reservation {
     this.autoSubmitted = false;
     this.set('captcha-loading', `${reason}，正在检查余位并换图重试（第 ${this.ocrAttempts + 1} 次）`, {image: undefined});
     try {
-      const data = await this.api.list();
+      const data = await this.stage('重试余位查询', () => this.api.list());
       if (!this.valid(g)) return;
       const item = data.activities.find(x => x.id === this.state.activity!.id);
       if (!item) throw new Error('列表中未找到该活动，已停止自动重试');
       this.offset = data.offset;
       this.state = {...this.state, activity: item, offset: this.offset, lastChecked: this.now(), full: false};
+      this.logCapacity(item);
       if (!this.bookable()) return;
       if (!knownCount(item)) throw new Error('无法确认剩余人数，已停止自动重试');
       if (fullCapacity(this.state)) {
@@ -138,15 +156,19 @@ export class Reservation {
     const g = ++this.generation;
     this.autoSubmitted = false;
     this.ocrAttempts = 0;
+    this.round = 0; this.submissions = 0;
+    this.diagnostics.record('log', '打开任务', {activityId: id, mode: this.mode, visibility: typeof document === 'undefined' ? 'unknown' : document.visibilityState});
     this.state = {phase: 'loading', message: '正在获取活动信息', mode: this.mode, taskMode: 'scheduled', interval: 60, followUp: false}; this.publish(this.state);
     if (this.mode === 'ocr') void this.prepareOcr();
     try {
-      const data = await this.api.list();
+      const data = await this.stage('活动查询', () => this.api.list());
       if (!this.valid(g)) return;
       let item = data.activities.find(x => x.id === id); this.offset = data.offset;
-      if (!item) { const detail = await this.api.detail(id); item = detail.activity; this.offset = detail.offset; }
+      if (!item) { const detail = await this.stage('活动详情查询', () => this.api.detail(id)); item = detail.activity; this.offset = detail.offset; }
       if (!this.valid(g)) return;
       this.state = {...this.state, activity: item, offset: this.offset, lastChecked: this.now()};
+      this.logCapacity(item);
+      this.diagnostics.record('log', '预约时间配置', {opensAt: new Date(item.startsAt).toISOString(), endsAt: new Date(item.endsAt).toISOString(), serverOffsetMs: this.offset});
       if (item.reserved) { this.set('success', '该活动已有预约记录'); return; }
       if (item.cancelled) {this.set('failed', '活动已取消'); return;}
       if (this.now() + this.offset >= item.endsAt) {this.set('failed', '预约时间已结束'); return;}
@@ -162,6 +184,7 @@ export class Reservation {
     if (options.taskMode && options.taskMode !== this.state.taskMode) {
       if (!allowed[options.taskMode]) return;
       this.cancelPending(); this.autoSubmitted = false;
+      this.diagnostics.record('log', '预约方式切换', {taskMode: options.taskMode});
       this.set('ready', '选择预约方式后开始', {taskMode: options.taskMode, ...this.inputForTask(options.taskMode), image: undefined, nextCheck: undefined, remaining: undefined, checking: false, error: false, retryAt: undefined});
       if (this.mode === 'ocr') void this.prepareOcr();
     }
@@ -171,11 +194,13 @@ export class Reservation {
     if (current.followUp && options.followUp !== undefined) extras.followUp = options.followUp;
     if (!Object.keys(extras).length) return;
     this.set(this.state.phase, this.state.message, extras);
+    this.diagnostics.record('log', '监测设置修改', {intervalSeconds: this.state.interval, followUp: this.state.followUp, nextCheck: this.state.nextCheck});
     // Keep this round's deadline; the new interval is read when scheduling the next round.
   }
   start() {
     if (!['ready', 'paused'].includes(this.state.phase) || !this.state.activity || !this.allowed()) return;
     if (!this.bookable()) return;
+    this.diagnostics.record('log', '启动任务', {taskMode: this.state.taskMode, mode: this.mode, ocrReady: this.state.ocrStatus === 'ready', serverOffsetMs: this.offset});
     if (this.state.taskMode !== 'monitor' && fullCapacity(this.state)) {this.offerMonitor(); return;}
     this.failures = 0;
     this.state = {...this.state, error: false};
@@ -199,12 +224,14 @@ export class Reservation {
   checkNow() {
     if (this.checking || !controls(this.state, this.now()).checkNow) return;
     clearTimeout(this.timer);
+    this.diagnostics.record('log', '立即检查');
     void this.checkMonitor(this.generation);
   }
   private jitter() {return (this.state.interval ?? 60) * 1000 * (0.9 + this.random() * 0.2);}
   private scheduleMonitor(delay: number, text: string, backoff = false) {
     clearTimeout(this.timer);
     const g = this.generation, nextCheck = this.now() + delay;
+    this.diagnostics.record(backoff ? 'warn' : 'log', '安排下次监测', {delayMs: Math.round(delay), backoff, failures: this.failures});
     const tick = () => {
       if (!this.valid(g) || this.state.phase !== 'monitoring') return;
       if (this.now() + this.offset >= this.state.activity!.endsAt) {this.set('failed', '预约时间已结束', {nextCheck: undefined, remaining: undefined}); return;}
@@ -221,12 +248,13 @@ export class Reservation {
     this.checking = true;
     this.set('monitoring', '正在查询余位', {checking: true, nextCheck: undefined, remaining: undefined, retryAt: undefined});
     try {
-      const data = await this.api.list();
+      const data = await this.stage('监测余位查询', () => this.api.list());
       if (!this.valid(g) || this.state.phase !== 'monitoring') return;
       const item = data.activities.find(x => x.id === this.state.activity!.id);
       if (!item) {this.pause('列表中未找到该活动，请在学校页面检查'); return;}
       this.offset = data.offset; this.failures = 0;
       this.state = {...this.state, activity: item, offset: this.offset, full: false, error: false, lastChecked: this.now(), checking: false};
+      this.logCapacity(item);
       if (item.reserved) {this.set('success', '该活动已有预约记录'); return;}
       if (item.cancelled) {this.set('failed', '活动已取消'); return;}
       const serverNow = this.now() + this.offset;
@@ -256,12 +284,14 @@ export class Reservation {
     if (this.now() + this.offset < this.state.activity.startsAt) return;
     if (this.state.phase === 'monitoring' && !knownCount(this.state.activity)) return;
     const g = this.generation;
+    ++this.round;
+    this.diagnostics.record('log', '开始取图轮次', {round: this.round, afterOpenMs: Math.round(this.now() + this.offset - this.state.activity.startsAt), ocrReady: this.state.ocrStatus === 'ready', visibility: typeof document === 'undefined' ? 'unknown' : document.visibilityState});
     clearTimeout(this.timer); ++this.ocrEpoch;
     this.set('captcha-loading', '正在获取验证码', {image: undefined, nextCheck: undefined, remaining: undefined, checking: false});
     for (let attempt = 0; attempt < 3; attempt++) {
       if (!this.valid(g) || !this.allowed()) return;
       try {
-        const image = await this.api.captcha();
+        const image = await this.stage('验证码获取', () => this.api.captcha());
         if (this.valid(g)) {
           this.set('input', '输入验证码后按回车或点击提交', {image});
           if (this.mode === 'ocr') void this.recognize(image);
@@ -271,6 +301,7 @@ export class Reservation {
         if (!this.valid(g)) return;
         if (!(error instanceof ApiError) || error.kind !== 'network' || attempt === 2) {this.set('failed', message(error)); return;}
         this.set('captcha-loading', '取图连接失败，稍后重试');
+        this.diagnostics.record('warn', '取图网络重试', {attempt: attempt + 1, delayMs: (attempt + 1) * 1000});
         await this.wait((attempt + 1) * 1000);
       }
     }
@@ -284,8 +315,9 @@ export class Reservation {
     if (!code || code.length > 4) {this.set('input', '请输入 1–4 位验证码'); return;}
     if (this.now() + this.offset >= this.state.activity.endsAt) {this.set('failed', '预约时间已结束'); return;}
     const g = this.generation;
+    ++this.submissions;
     this.set('submitting', '正在提交，请勿重复操作');
-    try { await this.api.submit(this.state.activity.id, code); }
+    try { await this.stage('预约提交', () => this.api.submit(this.state.activity!.id, code)); }
     catch (error) {
       if (!this.valid(g)) return;
       if (error instanceof ApiError && error.kind === 'business') {
@@ -302,6 +334,7 @@ export class Reservation {
         return;
       }
       // A network/format failure may follow a successful write. Never resend it.
+      this.diagnostics.record('warn', '提交结果不明，转入核验', errorInfo(error));
     }
     if (this.valid(g)) await this.verify();
   }
@@ -317,7 +350,9 @@ export class Reservation {
       if (attempt) await this.wait(attempt * 1000);
       if (!this.valid(g)) return;
       try {
-        if (await this.api.booked(this.state.activity.id)) {if (this.valid(g)) this.set('success', '预约成功，已核验预约记录', {activity: {...this.state.activity, reserved: true}}); return;}
+        const booked = await this.stage('预约记录核验', () => this.api.booked(this.state.activity!.id));
+        this.diagnostics.record('log', '核验结果', {attempt: attempt + 1, booked});
+        if (booked) {if (this.valid(g)) this.set('success', '预约成功，已核验预约记录', {activity: {...this.state.activity, reserved: true}}); return;}
         detail = '暂未查到预约记录';
       } catch (error) {
         detail = message(error);
@@ -335,7 +370,11 @@ export class Reservation {
     }
     return true;
   }
+  private logCapacity(item: Activity) {
+    this.diagnostics.record('log', '人数快照', {countKnown: knownCount(item), count: knownCount(item) ? item.count : undefined, capacity: item.capacity, reserved: item.reserved, cancelled: item.cancelled, serverOffsetMs: this.offset});
+  }
   private offerMonitor(error?: string) {
+    this.diagnostics.record('warn', '满员，停止连续预约', {followUp: this.state.followUp, taskMode: this.state.taskMode, round: this.round});
     this.cancelPending();
     this.set('ready', error ?? '选择预约方式后开始', {taskMode: 'monitor', ...this.inputForTask('monitor'), full: true, error: Boolean(error), image: undefined, nextCheck: undefined, remaining: undefined, checking: false, retryAt: undefined,
       activity: error && this.state.activity ? {...this.state.activity, countKnown: false} : this.state.activity});

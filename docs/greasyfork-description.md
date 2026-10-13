@@ -65,3 +65,7 @@
 项目采用 MIT 许可证，源码、构建文件、测试和接口说明均在 [GitHub 仓库](https://github.com/julymiaw/seu-lecture-helper)公开。
 
 遇到问题可在 [Issues](https://github.com/julymiaw/seu-lecture-helper/issues)反馈，请注明脚本版本、浏览器与用户脚本管理器、操作步骤和错误提示。截图请遮盖个人信息，不要提供密码、Cookie 或完整登录请求。
+
+## 失败诊断
+
+0.3.7 起自动输出 Console 日志。开始等待前打开浏览器开发者工具的 Console，开启“保留日志”，筛选 `[SEU预约助手]`。日志包含取验证码、OCR、提交和核验耗时，以及重试原因和最终状态；可将同一任务编号的日志用于问题反馈。不输出登录凭据、验证码图片或答案，不上传日志。页面关闭后不保证能恢复日志。

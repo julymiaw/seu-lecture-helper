@@ -6,7 +6,7 @@ export interface Activity {
   reserved: boolean; cancelled: boolean; capacity: number; count: number; countKnown: boolean;
 }
 export class ApiError extends Error {
-  constructor(message: string, public kind: 'business' | 'network' | 'session' | 'format' | 'rate') { super(message); }
+  constructor(message: string, public kind: 'business' | 'network' | 'session' | 'format' | 'rate', public httpStatus?: number, public businessCode?: number) { super(message); }
 }
 export function schoolTime(value: unknown): number {
   const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(String(value));
@@ -41,12 +41,14 @@ export class Api implements ReservationApi {
   private async request(name: string, data?: Record<string, string>): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
+    let httpStatus: number | undefined;
     try {
       const response = await this.transport(BASE + name, {
         method: data ? 'POST' : 'GET', credentials: 'same-origin', signal: controller.signal,
         headers: {'X-Requested-With': 'XMLHttpRequest', ...(data ? {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'} : {})},
         ...(data ? {body: new URLSearchParams(data).toString()} : {}),
       });
+      httpStatus = response.status;
       if (response.status === 401 || response.status === 403 || response.redirected) throw new ApiError('登录状态或访问权限异常，请在学校页面检查登录', 'session');
       if (response.status === 429) throw new ApiError('请求受到限流，请稍后再试', 'rate');
       if (!response.ok) throw new ApiError(`服务器响应异常（HTTP ${response.status}）`, 'network');
@@ -54,11 +56,11 @@ export class Api implements ReservationApi {
       const text = await response.text();
       try { body = JSON.parse(text); } catch { throw new ApiError('响应不是有效 JSON，请检查登录或稍后重试', 'format'); }
       if (!body || body.code === undefined) throw new ApiError('接口响应格式已变化', 'format');
-      if (String(body.code) !== '0') throw new ApiError(String(body.msg || '预约操作未成功'), 'business');
+      if (String(body.code) !== '0') throw new ApiError(String(body.msg || '预约操作未成功'), 'business', httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : undefined);
       return body.datas;
     } catch (error) {
-      if (error instanceof ApiError) throw error;
-      throw new ApiError(controller.signal.aborted ? '网络请求超时' : '网络连接失败', 'network');
+      if (error instanceof ApiError) {error.httpStatus ??= httpStatus; throw error;}
+      throw new ApiError(controller.signal.aborted ? '网络请求超时' : '网络连接失败', 'network', httpStatus);
     } finally { clearTimeout(timer); }
   }
   async list() {

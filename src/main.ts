@@ -1,4 +1,5 @@
 import {Api} from './api';
+import {VERSION} from './diagnostics';
 import {Dialog} from './dialog';
 import {acquireTask} from './lock';
 import {Mount} from './mount';
@@ -6,7 +7,7 @@ import {message, Reservation} from './reservation';
 import {BrowserOcr, savedMode, saveMode} from './ocr';
 // Also prevents duplicate injection in one document.
 if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
-  document.documentElement.setAttribute('data-seu-lecture-helper', '0.3.6');
+  document.documentElement.setAttribute('data-seu-lecture-helper', VERSION);
   const api = new Api();
   const ocr = new BrowserOcr();
   let current: {task: Reservation; dialog: Dialog; release: () => void} | undefined;

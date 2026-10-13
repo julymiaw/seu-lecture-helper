@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.3.6
+// @version      0.3.7
 // @description  倒计时预约、低频余位监测、本地 OCR／手动验证码与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -54,9 +54,11 @@ SOFTWARE.
   // src/api.ts
   var BASE = "/gsapp/sys/yddjzxxtjappseu/modules/hdyy/";
   var ApiError = class extends Error {
-    constructor(message2, kind) {
+    constructor(message2, kind, httpStatus, businessCode) {
       super(message2);
       this.kind = kind;
+      this.httpStatus = httpStatus;
+      this.businessCode = businessCode;
     }
   };
   function schoolTime(value) {
@@ -100,6 +102,7 @@ SOFTWARE.
     async request(name, data) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeout);
+      let httpStatus;
       try {
         const response = await this.transport(BASE + name, {
           method: data ? "POST" : "GET",
@@ -108,6 +111,7 @@ SOFTWARE.
           headers: { "X-Requested-With": "XMLHttpRequest", ...data ? { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" } : {} },
           ...data ? { body: new URLSearchParams(data).toString() } : {}
         });
+        httpStatus = response.status;
         if (response.status === 401 || response.status === 403 || response.redirected) throw new ApiError("\u767B\u5F55\u72B6\u6001\u6216\u8BBF\u95EE\u6743\u9650\u5F02\u5E38\uFF0C\u8BF7\u5728\u5B66\u6821\u9875\u9762\u68C0\u67E5\u767B\u5F55", "session");
         if (response.status === 429) throw new ApiError("\u8BF7\u6C42\u53D7\u5230\u9650\u6D41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5", "rate");
         if (!response.ok) throw new ApiError(`\u670D\u52A1\u5668\u54CD\u5E94\u5F02\u5E38\uFF08HTTP ${response.status}\uFF09`, "network");
@@ -119,11 +123,14 @@ SOFTWARE.
           throw new ApiError("\u54CD\u5E94\u4E0D\u662F\u6709\u6548 JSON\uFF0C\u8BF7\u68C0\u67E5\u767B\u5F55\u6216\u7A0D\u540E\u91CD\u8BD5", "format");
         }
         if (!body || body.code === void 0) throw new ApiError("\u63A5\u53E3\u54CD\u5E94\u683C\u5F0F\u5DF2\u53D8\u5316", "format");
-        if (String(body.code) !== "0") throw new ApiError(String(body.msg || "\u9884\u7EA6\u64CD\u4F5C\u672A\u6210\u529F"), "business");
+        if (String(body.code) !== "0") throw new ApiError(String(body.msg || "\u9884\u7EA6\u64CD\u4F5C\u672A\u6210\u529F"), "business", httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : void 0);
         return body.datas;
       } catch (error) {
-        if (error instanceof ApiError) throw error;
-        throw new ApiError(controller.signal.aborted ? "\u7F51\u7EDC\u8BF7\u6C42\u8D85\u65F6" : "\u7F51\u7EDC\u8FDE\u63A5\u5931\u8D25", "network");
+        if (error instanceof ApiError) {
+          error.httpStatus ??= httpStatus;
+          throw error;
+        }
+        throw new ApiError(controller.signal.aborted ? "\u7F51\u7EDC\u8BF7\u6C42\u8D85\u65F6" : "\u7F51\u7EDC\u8FDE\u63A5\u5931\u8D25", "network", httpStatus);
       } finally {
         clearTimeout(timer);
       }
@@ -157,6 +164,60 @@ SOFTWARE.
     async booked(id) {
       const data = await this.request("queryMyActivityList.do", { param: JSON.stringify({ FBZT: "1" }) });
       return rows(data?.wdhdList).some((row) => String(row.HD_WID) === id && Boolean(row.YY_WID) && String(row.FBZT) !== "-1");
+    }
+  };
+
+  // package.json
+  var version = "0.3.7";
+
+  // src/diagnostics.ts
+  var VERSION = version;
+  var sequence = 0;
+  function errorInfo(error) {
+    if (error instanceof ApiError) return {
+      kind: error.kind,
+      httpStatus: error.httpStatus,
+      businessCode: error.businessCode,
+      reason: error.kind === "business" ? businessReason(error.message) : error.kind === "network" && error.message.includes("\u8D85\u65F6") ? "timeout" : error.kind
+    };
+    return { kind: "unexpected" };
+  }
+  function businessReason(text) {
+    if (text.includes("\u9A8C\u8BC1\u7801")) return "captcha-rejected";
+    if (text.includes("\u4EBA\u6570\u5DF2\u6EE1")) return "full";
+    if (text.includes("\u767B\u5F55") || text.includes("\u6743\u9650")) return "session-or-permission";
+    if (text.includes("\u9891\u7E41") || text.includes("\u9650\u6D41")) return "rate";
+    if (text.includes("\u7ED3\u675F")) return "ended";
+    if (text.includes("\u53D6\u6D88")) return "cancelled";
+    return "other";
+  }
+  var Diagnostics = class {
+    id = `${Date.now().toString(36)}-${++sequence}`;
+    started = performance.now();
+    record(level, event, fields = {}) {
+      try {
+        console[level]("[SEU\u9884\u7EA6\u52A9\u624B]", {
+          version: VERSION,
+          task: this.id,
+          at: (/* @__PURE__ */ new Date()).toISOString(),
+          elapsedMs: Math.round(performance.now() - this.started),
+          event,
+          ...fields
+        });
+      } catch {
+      }
+    }
+    async measure(stage, operation, fields = {}, stale = () => false) {
+      this.record("log", stage + "\u5F00\u59CB", fields);
+      const started = performance.now();
+      try {
+        const result = await operation();
+        this.record("log", stage + "\u5B8C\u6210", { ...fields, durationMs: Math.round(performance.now() - started), stale: stale() });
+        return result;
+      } catch (error) {
+        this.record("warn", stage + "\u5931\u8D25", { ...fields, durationMs: Math.round(performance.now() - started), stale: stale(), ...errorInfo(error) });
+        throw error;
+      }
     }
   };
 
@@ -208,9 +269,26 @@ SOFTWARE.
     scheduledMode;
     checking = false;
     failures = 0;
+    diagnostics = new Diagnostics();
+    round = 0;
+    submissions = 0;
+    stage(name, operation, stale = () => false) {
+      const g = this.generation;
+      return this.diagnostics.measure(name, operation, { round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
+    }
     set(phase, message2, extras = {}) {
+      const previous = this.state.phase;
       this.state = { ...this.state, phase, message: message2, ...extras };
       this.publish(this.state);
+      if (phase !== previous) this.diagnostics.record(phase === "failed" ? "error" : ["paused", "unknown"].includes(phase) ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", {
+        from: previous,
+        phase,
+        mode: this.mode,
+        taskMode: this.state.taskMode,
+        round: this.round,
+        submissions: this.submissions,
+        reason: ["failed", "paused", "unknown", "ready"].includes(phase) ? businessReason(message2) : void 0
+      });
     }
     valid(g) {
       return g === this.generation && this.state.phase !== "closed";
@@ -224,6 +302,7 @@ SOFTWARE.
       }
       this.mode = mode;
       ++this.ocrEpoch;
+      this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u65B9\u5F0F\u5207\u6362", { mode });
       if (this.state.taskMode !== "monitor") this.scheduledMode = mode;
       const phase = this.state.phase === "recognizing" ? "input" : this.state.phase;
       this.set(phase, phase === "input" ? "\u8F93\u5165\u9A8C\u8BC1\u7801\u540E\u6309\u56DE\u8F66\u6216\u70B9\u51FB\u63D0\u4EA4" : this.state.message, { mode });
@@ -241,7 +320,7 @@ SOFTWARE.
       const g = this.generation;
       this.set(this.state.phase, this.state.message, { ocrStatus: "loading", ocrMessage: "\u6B63\u5728\u51C6\u5907\u672C\u5730\u8BC6\u522B \xB7 \u9996\u6B21\u4E0B\u8F7D\u7EA6 68 MB" });
       try {
-        await this.ocr.prepare();
+        await this.stage("OCR\u51C6\u5907\u4E0E\u9884\u70ED", () => this.ocr.prepare());
         if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "ready", ocrMessage: "\u672C\u5730\u8BC6\u522B\u5DF2\u5C31\u7EEA \xB7 \u9A8C\u8BC1\u7801\u4E0D\u4E0A\u4F20" });
       } catch (error) {
         if (!this.valid(g)) return;
@@ -250,6 +329,7 @@ SOFTWARE.
       }
     }
     manual(text) {
+      this.diagnostics.record("warn", "\u56DE\u9000\u624B\u52A8\u8F93\u5165", { reason: this.state.ocrStatus === "failed" ? "ocr-assets-unavailable" : "ocr-unavailable" });
       this.mode = "manual";
       ++this.ocrEpoch;
       this.set(this.state.phase === "recognizing" ? "input" : this.state.phase, text, { mode: "manual", manualFallback: this.state.taskMode === "monitor" });
@@ -266,8 +346,9 @@ SOFTWARE.
       ++this.ocrAttempts;
       this.set("recognizing", "\u6B63\u5728\u672C\u5730\u8BC6\u522B\u9A8C\u8BC1\u7801\uFF1B\u53EF\u5207\u6362\u4E3A\u624B\u52A8\u8F93\u5165");
       try {
-        const code = (await this.ocr.recognize(image)).trim();
+        const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch || this.mode !== "ocr" || this.state.image !== image)).trim();
         if (!this.valid(g) || epoch !== this.ocrEpoch || this.mode !== "ocr" || this.state.image !== image || this.state.phase !== "recognizing") return;
+        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, attempt: this.ocrAttempts, length: code.length, valid: /^[a-z0-9]{4}$/i.test(code) });
         if (!/^[a-z0-9]{4}$/i.test(code)) {
           await this.retryOcr("\u672A\u8BC6\u522B\u51FA\u5B8C\u6574\u7684 4 \u4F4D\u9A8C\u8BC1\u7801");
           return;
@@ -280,6 +361,7 @@ SOFTWARE.
       }
     }
     async retryOcr(reason, rejected = false) {
+      this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5", { round: this.round, attempt: this.ocrAttempts, reason: rejected ? "captcha-rejected" : "ocr-failed-or-incomplete" });
       if (this.state.ocrStatus === "failed") {
         this.manual(`${reason}\uFF0C\u81EA\u52A8\u5C1D\u8BD5\u5DF2\u505C\u6B62\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165`);
         if (rejected) {
@@ -292,12 +374,13 @@ SOFTWARE.
       this.autoSubmitted = false;
       this.set("captcha-loading", `${reason}\uFF0C\u6B63\u5728\u68C0\u67E5\u4F59\u4F4D\u5E76\u6362\u56FE\u91CD\u8BD5\uFF08\u7B2C ${this.ocrAttempts + 1} \u6B21\uFF09`, { image: void 0 });
       try {
-        const data = await this.api.list();
+        const data = await this.stage("\u91CD\u8BD5\u4F59\u4F4D\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
         const item = data.activities.find((x) => x.id === this.state.activity.id);
         if (!item) throw new Error("\u5217\u8868\u4E2D\u672A\u627E\u5230\u8BE5\u6D3B\u52A8\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
         this.offset = data.offset;
         this.state = { ...this.state, activity: item, offset: this.offset, lastChecked: this.now(), full: false };
+        this.logCapacity(item);
         if (!this.bookable()) return;
         if (!knownCount(item)) throw new Error("\u65E0\u6CD5\u786E\u8BA4\u5269\u4F59\u4EBA\u6570\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u91CD\u8BD5");
         if (fullCapacity(this.state)) {
@@ -330,21 +413,26 @@ SOFTWARE.
       const g = ++this.generation;
       this.autoSubmitted = false;
       this.ocrAttempts = 0;
+      this.round = 0;
+      this.submissions = 0;
+      this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id, mode: this.mode, visibility: typeof document === "undefined" ? "unknown" : document.visibilityState });
       this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", mode: this.mode, taskMode: "scheduled", interval: 60, followUp: false };
       this.publish(this.state);
       if (this.mode === "ocr") void this.prepareOcr();
       try {
-        const data = await this.api.list();
+        const data = await this.stage("\u6D3B\u52A8\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
         let item = data.activities.find((x) => x.id === id);
         this.offset = data.offset;
         if (!item) {
-          const detail = await this.api.detail(id);
+          const detail = await this.stage("\u6D3B\u52A8\u8BE6\u60C5\u67E5\u8BE2", () => this.api.detail(id));
           item = detail.activity;
           this.offset = detail.offset;
         }
         if (!this.valid(g)) return;
         this.state = { ...this.state, activity: item, offset: this.offset, lastChecked: this.now() };
+        this.logCapacity(item);
+        this.diagnostics.record("log", "\u9884\u7EA6\u65F6\u95F4\u914D\u7F6E", { opensAt: new Date(item.startsAt).toISOString(), endsAt: new Date(item.endsAt).toISOString(), serverOffsetMs: this.offset });
         if (item.reserved) {
           this.set("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
           return;
@@ -372,6 +460,7 @@ SOFTWARE.
         if (!allowed[options.taskMode]) return;
         this.cancelPending();
         this.autoSubmitted = false;
+        this.diagnostics.record("log", "\u9884\u7EA6\u65B9\u5F0F\u5207\u6362", { taskMode: options.taskMode });
         this.set("ready", "\u9009\u62E9\u9884\u7EA6\u65B9\u5F0F\u540E\u5F00\u59CB", { taskMode: options.taskMode, ...this.inputForTask(options.taskMode), image: void 0, nextCheck: void 0, remaining: void 0, checking: false, error: false, retryAt: void 0 });
         if (this.mode === "ocr") void this.prepareOcr();
       }
@@ -381,10 +470,12 @@ SOFTWARE.
       if (current.followUp && options.followUp !== void 0) extras.followUp = options.followUp;
       if (!Object.keys(extras).length) return;
       this.set(this.state.phase, this.state.message, extras);
+      this.diagnostics.record("log", "\u76D1\u6D4B\u8BBE\u7F6E\u4FEE\u6539", { intervalSeconds: this.state.interval, followUp: this.state.followUp, nextCheck: this.state.nextCheck });
     }
     start() {
       if (!["ready", "paused"].includes(this.state.phase) || !this.state.activity || !this.allowed()) return;
       if (!this.bookable()) return;
+      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { taskMode: this.state.taskMode, mode: this.mode, ocrReady: this.state.ocrStatus === "ready", serverOffsetMs: this.offset });
       if (this.state.taskMode !== "monitor" && fullCapacity(this.state)) {
         this.offerMonitor();
         return;
@@ -419,6 +510,7 @@ SOFTWARE.
     checkNow() {
       if (this.checking || !controls(this.state, this.now()).checkNow) return;
       clearTimeout(this.timer);
+      this.diagnostics.record("log", "\u7ACB\u5373\u68C0\u67E5");
       void this.checkMonitor(this.generation);
     }
     jitter() {
@@ -427,6 +519,7 @@ SOFTWARE.
     scheduleMonitor(delay, text, backoff = false) {
       clearTimeout(this.timer);
       const g = this.generation, nextCheck = this.now() + delay;
+      this.diagnostics.record(backoff ? "warn" : "log", "\u5B89\u6392\u4E0B\u6B21\u76D1\u6D4B", { delayMs: Math.round(delay), backoff, failures: this.failures });
       const tick = () => {
         if (!this.valid(g) || this.state.phase !== "monitoring") return;
         if (this.now() + this.offset >= this.state.activity.endsAt) {
@@ -453,7 +546,7 @@ SOFTWARE.
       this.checking = true;
       this.set("monitoring", "\u6B63\u5728\u67E5\u8BE2\u4F59\u4F4D", { checking: true, nextCheck: void 0, remaining: void 0, retryAt: void 0 });
       try {
-        const data = await this.api.list();
+        const data = await this.stage("\u76D1\u6D4B\u4F59\u4F4D\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g) || this.state.phase !== "monitoring") return;
         const item = data.activities.find((x) => x.id === this.state.activity.id);
         if (!item) {
@@ -463,6 +556,7 @@ SOFTWARE.
         this.offset = data.offset;
         this.failures = 0;
         this.state = { ...this.state, activity: item, offset: this.offset, full: false, error: false, lastChecked: this.now(), checking: false };
+        this.logCapacity(item);
         if (item.reserved) {
           this.set("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
           return;
@@ -518,13 +612,15 @@ SOFTWARE.
       if (this.now() + this.offset < this.state.activity.startsAt) return;
       if (this.state.phase === "monitoring" && !knownCount(this.state.activity)) return;
       const g = this.generation;
+      ++this.round;
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, afterOpenMs: Math.round(this.now() + this.offset - this.state.activity.startsAt), ocrReady: this.state.ocrStatus === "ready", visibility: typeof document === "undefined" ? "unknown" : document.visibilityState });
       clearTimeout(this.timer);
       ++this.ocrEpoch;
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, nextCheck: void 0, remaining: void 0, checking: false });
       for (let attempt = 0; attempt < 3; attempt++) {
         if (!this.valid(g) || !this.allowed()) return;
         try {
-          const image = await this.api.captcha();
+          const image = await this.stage("\u9A8C\u8BC1\u7801\u83B7\u53D6", () => this.api.captcha());
           if (this.valid(g)) {
             this.set("input", "\u8F93\u5165\u9A8C\u8BC1\u7801\u540E\u6309\u56DE\u8F66\u6216\u70B9\u51FB\u63D0\u4EA4", { image });
             if (this.mode === "ocr") void this.recognize(image);
@@ -537,6 +633,7 @@ SOFTWARE.
             return;
           }
           this.set("captcha-loading", "\u53D6\u56FE\u8FDE\u63A5\u5931\u8D25\uFF0C\u7A0D\u540E\u91CD\u8BD5");
+          this.diagnostics.record("warn", "\u53D6\u56FE\u7F51\u7EDC\u91CD\u8BD5", { attempt: attempt + 1, delayMs: (attempt + 1) * 1e3 });
           await this.wait((attempt + 1) * 1e3);
         }
       }
@@ -559,9 +656,10 @@ SOFTWARE.
         return;
       }
       const g = this.generation;
+      ++this.submissions;
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\uFF0C\u8BF7\u52FF\u91CD\u590D\u64CD\u4F5C");
       try {
-        await this.api.submit(this.state.activity.id, code);
+        await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
       } catch (error) {
         if (!this.valid(g)) return;
         if (error instanceof ApiError && error.kind === "business") {
@@ -580,6 +678,7 @@ SOFTWARE.
           } else this.set("failed", error.message);
           return;
         }
+        this.diagnostics.record("warn", "\u63D0\u4EA4\u7ED3\u679C\u4E0D\u660E\uFF0C\u8F6C\u5165\u6838\u9A8C", errorInfo(error));
       }
       if (this.valid(g)) await this.verify();
     }
@@ -594,7 +693,9 @@ SOFTWARE.
         if (attempt) await this.wait(attempt * 1e3);
         if (!this.valid(g)) return;
         try {
-          if (await this.api.booked(this.state.activity.id)) {
+          const booked = await this.stage("\u9884\u7EA6\u8BB0\u5F55\u6838\u9A8C", () => this.api.booked(this.state.activity.id));
+          this.diagnostics.record("log", "\u6838\u9A8C\u7ED3\u679C", { attempt: attempt + 1, booked });
+          if (booked) {
             if (this.valid(g)) this.set("success", "\u9884\u7EA6\u6210\u529F\uFF0C\u5DF2\u6838\u9A8C\u9884\u7EA6\u8BB0\u5F55", { activity: { ...this.state.activity, reserved: true } });
             return;
           }
@@ -619,7 +720,11 @@ SOFTWARE.
       }
       return true;
     }
+    logCapacity(item) {
+      this.diagnostics.record("log", "\u4EBA\u6570\u5FEB\u7167", { countKnown: knownCount(item), count: knownCount(item) ? item.count : void 0, capacity: item.capacity, reserved: item.reserved, cancelled: item.cancelled, serverOffsetMs: this.offset });
+    }
     offerMonitor(error) {
+      this.diagnostics.record("warn", "\u6EE1\u5458\uFF0C\u505C\u6B62\u8FDE\u7EED\u9884\u7EA6", { followUp: this.state.followUp, taskMode: this.state.taskMode, round: this.round });
       this.cancelPending();
       this.set("ready", error ?? "\u9009\u62E9\u9884\u7EA6\u65B9\u5F0F\u540E\u5F00\u59CB", {
         taskMode: "monitor",
@@ -3920,7 +4025,7 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
       }
     };
     notice2 = notice, close2 = close;
-    document.documentElement.setAttribute("data-seu-lecture-helper", "0.3.6");
+    document.documentElement.setAttribute("data-seu-lecture-helper", VERSION);
     const api = new Api();
     const ocr = new BrowserOcr();
     let current;

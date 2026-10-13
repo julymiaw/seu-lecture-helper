@@ -97,3 +97,18 @@ describe('monitoring count evidence',()=>{
     expect(result.activities.find(x=>x.id===data.datas.hdrsList[0].HD_WID)?.countKnown).toBe(false);
   });
 });
+
+describe('diagnostic error metadata', () => {
+  it('preserves HTTP and numeric business status without attaching the response', async () => {
+    const api = new Api(vi.fn(async () => response({code:42,msg:'验证码错误',datas:null,secret:'private'})));
+    try {await api.submit('id','0733'); throw new Error('expected rejection');}
+    catch (error) {
+      expect(error).toMatchObject({kind:'business',httpStatus:200,businessCode:42});
+      expect(JSON.stringify(error)).not.toContain('private');
+    }
+  });
+  it.each([401,429,503])('preserves HTTP %i for diagnostics', async status => {
+    const api = new Api(vi.fn(async () => response({},status)));
+    await expect(api.captcha()).rejects.toMatchObject({httpStatus:status});
+  });
+});
