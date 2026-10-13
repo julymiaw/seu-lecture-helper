@@ -34,11 +34,11 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
         const label = state.phase === 'waiting' ? '等待中' : ['captcha-loading', 'recognizing', 'input', 'submitting', 'verifying'].includes(state.phase) ? '预约中' : '';
         mount.setActive(label ? state.activity?.id : undefined, label);
         current?.dialog.render(state);
-      }, Date.now, () => true, ocr);
+      }, Date.now, ocr);
       const dialog = new Dialog({submit: () => {void task.submit();}, edit: code => task.editCode(code), refresh: () => {void task.loadCaptcha();}, verify: () => {void task.verify();}, close, reload: () => location.reload(),
         start: () => task.start(), configure: seconds => task.configure(seconds), hide: () => dialog.hide()});
       current = {task, dialog, release};
-      void task.open(id, false);
+      void task.open(id);
     } catch (error) {release?.(); notice(message(error));}
     finally {opening = false;}
   }

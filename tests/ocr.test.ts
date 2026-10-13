@@ -3,18 +3,17 @@ import {webcrypto} from 'node:crypto';
 import {decodeCtc} from '../src/ocr';
 import {loadAsset, validAsset, type Asset} from '../src/ocr-assets';
 
-describe('OCR output and preference', () => {
+describe('numeric OCR output', () => {
   it('numeric CTC chooses the highest allowed probability, preserves zero and merges only adjacent repeats',()=>{
     const charset=['','0','7','O'];
     const data=[0,5,1,10, 9,1,0,2, 0,2,8,10, 0,2,8,10];
-    expect(decodeCtc(data,[4,1,4],charset)).toBe('OO');
-    expect(decodeCtc(data,[4,1,4],charset,true)).toBe('07');
+    expect(decodeCtc(data,[4,1,4],charset)).toBe('07');
   });
-  it('decodes repeated characters separated by blanks, without filtering letters', () => {
-    const charset=['','0','1','A'];
-    const tokens=[0,1,1,0,1,2,2,0,2,3,3,0];
+  it('decodes repeated digits separated by blanks', () => {
+    const charset=['','0','1'];
+    const tokens=[0,1,1,0,1,2,2,0,2,0];
     const data=tokens.flatMap(token=>charset.map((_,i)=>i===token?10:0));
-    expect(decodeCtc(data,[tokens.length,1,4],charset)).toBe('0011A');
+    expect(decodeCtc(data,[tokens.length,1,3],charset)).toBe('0011');
     expect(()=>decodeCtc(data,[2,2,4],charset)).toThrow('格式');
   });
 

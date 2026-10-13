@@ -22,13 +22,12 @@ export class Reservation {
   private timer?: ReturnType<typeof setTimeout>;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private wake?: () => void;
-  private offset=0;
   private round=0;
   private submissions=0;
-  private captured=false;
   private incomplete=false;
   private diagnostics=new Diagnostics();
-  constructor(private api:ReservationApi, private publish:(state:State)=>void, private now=Date.now, private owns=()=>true, private ocr?:OcrEngine) {}
+  constructor(private api:ReservationApi, private publish:(state:State)=>void, private now=Date.now, private ocr?:OcrEngine) {}
+  private serverNow() {return this.now()+(this.state.offset??0);}
   private valid(g:number) {return g===this.generation && this.state.phase!=='closed';}
   private stage<T>(name:string,operation:()=>Promise<T>,stale=()=>false) {
     const g=this.generation;
@@ -42,9 +41,8 @@ export class Reservation {
   private bookable() {
     const a=this.state.activity;
     if(!a)return false;
-    if(!this.owns()){this.stop('预约任务已由其他标签页接管');return false;}
     if(a.reserved){this.finish('success','该活动已有预约记录');return false;}
-    if(a.cancelled || this.now()+this.offset>=a.endsAt || fullCapacity(this.state)) {
+    if(a.cancelled || this.serverNow()>=a.endsAt || fullCapacity(this.state)) {
       this.stop(a.cancelled?'活动已取消':fullCapacity(this.state)?'当前活动预约人数已满':'预约时间已结束');return false;
     }
     return true;
@@ -60,20 +58,20 @@ export class Reservation {
       if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'ready',ocrMessage:undefined});
     }catch(error){if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'failed',ocrMessage:'识别引擎不可用，请填写验证码'});}
   }
-  async open(id:string,autoStart=true) {
+  async open(id:string) {
     const g=++this.generation;
-    this.diagnostics=new Diagnostics();this.round=0;this.submissions=0;this.captured=false;
+    this.diagnostics=new Diagnostics();this.round=0;this.submissions=0;this.incomplete=false;
     this.state={phase:'loading',message:'正在获取活动信息',leadSeconds:30};this.publish(this.state);
-    this.diagnostics.record('log','打开任务',{activityId:id});void this.prepareOcr();
+    this.diagnostics.record('log','打开任务',{activityId:id});
     try {
       const data=await this.stage('活动查询',()=>this.api.list());
       if(!this.valid(g))return;
-      let activity=data.activities.find(a=>a.id===id);this.offset=data.offset;
-      if(!activity){const detail=await this.stage('活动详情查询',()=>this.api.detail(id));activity=detail.activity;this.offset=detail.offset;}
+      let activity=data.activities.find(a=>a.id===id), offset=data.offset;
+      if(!activity){const detail=await this.stage('活动详情查询',()=>this.api.detail(id));activity=detail.activity;offset=detail.offset;}
       if(!this.valid(g))return;
-      this.state={...this.state,activity,offset:this.offset};
+      this.state={...this.state,activity,offset};
       if(!this.bookable())return;
-      this.set('ready','');if(autoStart)this.start();
+      this.set('ready','');void this.prepareOcr();
     }catch(error){if(this.valid(g))this.stop(message(error));}
   }
   configure(leadSeconds:number) {
@@ -81,16 +79,16 @@ export class Reservation {
   }
   start() {
     if(!controls(this.state,this.now()).start || !this.bookable())return;
-    this.captured=false;this.set('waiting','',{armed:true});
-    this.diagnostics.record('log','启动任务',{leadSeconds:this.state.leadSeconds,serverOffsetMs:this.offset});
+    this.set('waiting','',{armed:true});
+    this.diagnostics.record('log','启动任务',{leadSeconds:this.state.leadSeconds,serverOffsetMs:this.state.offset});
     this.tick();
   }
   private tick=()=>{
     clearTimeout(this.timer);
     if(!this.state.armed || !this.bookable())return;
-    const remaining=this.state.activity!.startsAt-this.now()-this.offset;
+    const remaining=this.state.activity!.startsAt-this.serverNow();
     this.set(this.state.phase,this.state.message,{remaining:Math.max(0,remaining)});
-    if(!this.captured && remaining<=(this.state.leadSeconds??30)*1000){this.captured=true;void this.loadCaptcha();}
+    if(this.round===0 && remaining<=(this.state.leadSeconds??30)*1000)void this.loadCaptcha();
     if(remaining<=0){if(controls(this.state,this.now()).submit)void this.submit();else if(this.incomplete)void this.retryCaptcha();return;}
     this.timer=setTimeout(this.tick,Math.min(250,remaining));
   };
@@ -105,7 +103,7 @@ export class Reservation {
     const g=this.generation,epoch=++this.ocrEpoch;
     this.incomplete=false;
     ++this.round;
-    this.diagnostics.record('log','开始取图轮次',{round:this.round,afterOpenMs:this.now()+this.offset-this.state.activity!.startsAt,ocrReady:this.state.ocrStatus==='ready',visibility:document.visibilityState});
+    this.diagnostics.record('log','开始取图轮次',{round:this.round,afterOpenMs:this.serverNow()-this.state.activity!.startsAt,ocrReady:this.state.ocrStatus==='ready',visibility:document.visibilityState});
     this.set('captcha-loading','正在获取验证码',{image:undefined,code:''});
     for(let attempt=0;attempt<3;attempt++) {
       try {
@@ -131,12 +129,12 @@ export class Reservation {
       this.diagnostics.record('log','OCR输出检查',{length:code.length,valid:/^\d{4}$/.test(code)});
       if(!/^\d{4}$/.test(code)){await this.ocrFailed();return;}
       this.set('input','',{code});
-      if(this.now()+this.offset>=this.state.activity!.startsAt)await this.submit();
+      if(this.serverNow()>=this.state.activity!.startsAt)await this.submit();
     }catch{if(this.valid(g)&&epoch===this.ocrEpoch)await this.ocrFailed();}
   }
   private async ocrFailed() {
     if(this.state.ocrStatus==='failed'){this.set('input','识别引擎不可用，请填写验证码');return;}
-    if(this.now()+this.offset<this.state.activity!.startsAt) {
+    if(this.serverNow()<this.state.activity!.startsAt) {
       // Keep the image editable; do not churn CAPTCHA challenges before opening.
       this.set('input','识别失败，可修改验证码；开放后自动换图重试');
       this.incomplete=true;
@@ -154,7 +152,7 @@ export class Reservation {
     const code=this.state.code!.trim();
     ++this.ocrEpoch;clearTimeout(this.timer);
     const g=this.generation;++this.submissions;
-    this.diagnostics.record('log','提交时机',{afterOpenMs:this.now()+this.offset-this.state.activity!.startsAt});
+    this.diagnostics.record('log','提交时机',{afterOpenMs:this.serverNow()-this.state.activity!.startsAt});
     this.set('submitting','正在提交预约');
     try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));this.diagnostics.record('log','服务端报告预约成功',{responseCode:0,responseData:1});}
     catch(error){

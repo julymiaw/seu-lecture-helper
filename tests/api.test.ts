@@ -84,7 +84,7 @@ describe('Shanghai time', () => {
   it.each(['bad','2026-02-30 12:00:00','2026-10-12 24:00:00'])('rejects %s', x => expect(()=>schoolTime(x)).toThrow());
 });
 
-describe('monitoring count evidence',()=>{
+describe('activity count parsing',()=>{
   it('distinguishes an explicit zero from absent count rows',async()=>{
     const data=clone(raw);data.datas.hdrsList=[{HD_WID:data.datas.hdlbList[0].WID,YYRS:0}];
     const result=await new Api(vi.fn(async()=>response(data)),()=>NOW).list();
@@ -103,7 +103,7 @@ describe('diagnostic error metadata', () => {
     const api = new Api(vi.fn(async () => response({code:42,msg:'验证码错误',datas:null,secret:'private'})));
     try {await api.submit('id','0733'); throw new Error('expected rejection');}
     catch (error) {
-      expect(error).toMatchObject({kind:'business',httpStatus:200,businessCode:42});
+      expect(error).toMatchObject({kind:'business',httpStatus:200,feedback:{code:42,datas:null,msg:'验证码错误'}});
       expect(JSON.stringify(error)).not.toContain('private');
     }
   });

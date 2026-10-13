@@ -1,13 +1,13 @@
 export const BASE = '/gsapp/sys/yddjzxxtjappseu/modules/hdyy/';
 export type Row = Record<string, unknown>;
 export interface Activity {
-  id: string; title: string; place: string; category: string;
+  id: string; title: string; place: string;
   startsAt: number; endsAt: number; eventStart: string; eventEnd: string;
   reserved: boolean; cancelled: boolean; capacity: number; count: number; countKnown: boolean;
 }
 export class ApiError extends Error {
   feedback?: {code: number | string; datas: number | boolean | null; msg: string};
-  constructor(message: string, public kind: 'business' | 'network' | 'session' | 'format' | 'rate', public httpStatus?: number, public businessCode?: number) { super(message); }
+  constructor(message: string, public kind: 'business' | 'network' | 'session' | 'format' | 'rate', public httpStatus?: number) { super(message); }
 }
 export function schoolTime(value: unknown): number {
   const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(String(value));
@@ -21,7 +21,7 @@ export function schoolTime(value: unknown): number {
 }
 export function activity(row: Row): Activity {
   if (!row.WID || !row.JZMC) throw new ApiError('活动信息缺少 ID 或标题', 'format');
-  return {id: String(row.WID), title: String(row.JZMC), place: String(row.JZDD ?? ''), category: String(row.JZXL_DISPLAY ?? ''),
+  return {id: String(row.WID), title: String(row.JZMC), place: String(row.JZDD ?? ''),
     startsAt: schoolTime(row.YYKSSJ), endsAt: schoolTime(row.YYJSSJ), eventStart: String(row.JZSJ ?? ''), eventEnd: String(row.HDJSSJ ?? ''),
     reserved: Boolean(row.YY_WID), cancelled: String(row.FBZT) === '-1', capacity: Number(row.HDZRS ?? 0), count: Number(row.YYRS ?? 0),
     countKnown: row.YYRS !== undefined && row.YYRS !== null && String(row.YYRS).trim() !== '' && Number.isInteger(Number(row.YYRS)) && Number(row.YYRS) >= 0};
@@ -58,7 +58,7 @@ export class Api implements ReservationApi {
       try { body = JSON.parse(text); } catch { throw new ApiError('响应不是有效 JSON，请检查登录或稍后重试', 'format'); }
       if (!body || body.code === undefined) throw new ApiError('接口响应格式已变化', 'format');
       if (String(body.code) !== '0') {
-        const error = new ApiError(String(body.msg || '预约操作未成功'), 'business', httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : undefined);
+        const error = new ApiError(String(body.msg || '预约操作未成功'), 'business', httpStatus);
         // Retain only the business envelope; omit arbitrary response data and debugException.
         const msg = String(body.msg || '').replace(/data:image\/[^\s]+/gi, '[image]').replace(/(?:cookie|authorization|token|password)\s*[:=]\s*[^\s,;]+/gi, '[credential]').replace(/\b\d{4}\b/g, '[digits]').slice(0, 500);
         error.feedback = {code: typeof body.code === 'number' ? body.code : String(body.code).slice(0, 32), datas: body.datas === null || typeof body.datas === 'number' || typeof body.datas === 'boolean' ? body.datas : null, msg};

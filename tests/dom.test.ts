@@ -4,7 +4,7 @@ import {Mount, matchCard} from '../src/mount';
 import {Api} from '../src/api';
 import {acquireTask} from '../src/lock';
 import raw from './fixtures/activities.json';
-import {clone, deferred, fixture, NOW, response, sample} from './helpers';
+import {deferred, fixture, NOW, response, sample} from './helpers';
 beforeEach(() => {
   vi.useFakeTimers(); vi.setSystemTime(NOW);
   HTMLDialogElement.prototype.showModal = function() {this.setAttribute('open','');};

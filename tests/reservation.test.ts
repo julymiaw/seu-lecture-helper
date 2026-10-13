@@ -7,8 +7,8 @@ async function setup(options:{future?:number;ocr?:{prepare:()=>Promise<void>;rec
   vi.useFakeTimers();vi.setSystemTime(NOW);
   const activity={...await sample(),reserved:false,startsAt:NOW+(options.future??-1000)};
   const api=await mockApi({list:vi.fn(async()=>({activities:[activity],offset:0})),...options.overrides});
-  const task=new Reservation(api,vi.fn(),Date.now,()=>true,options.ocr);
-  await task.open(activity.id,false);await flush();return{task,api,activity};
+  const task=new Reservation(api,vi.fn(),Date.now,options.ocr);
+  await task.open(activity.id);await flush();return{task,api,activity};
 }
 const ocr=()=>({prepare:vi.fn(async()=>{}),recognize:vi.fn(async()=> '0733')});
 it('obtains and recognizes at T-30s, then submits only at the opening deadline',async()=>{
@@ -99,9 +99,6 @@ it('late CAPTCHA response after closing is ignored',async()=>{
 it('falls back to detail data when the target is absent from the list',async()=>{
   const{task,api}=await setup({overrides:{list:vi.fn(async()=>({activities:[],offset:0}))}});expect(api.detail).toHaveBeenCalledTimes(1);task.start();await flush();expect(api.captcha).toHaveBeenCalledTimes(1);task.close();
 });
-it('stops before requests when cross-tab ownership is lost',async()=>{
-  const api=await mockApi();const task=new Reservation(api,vi.fn(),()=>NOW,()=>false);await task.open((await sample()).id);expect(task.state.phase).toBe('failed');expect(api.captcha).not.toHaveBeenCalled();
-});
 it('closing during a network retry cancels the remaining attempts',async()=>{
   const{task,api}=await setup({overrides:{captcha:vi.fn(async()=>{throw new ApiError('offline','network');})}});task.start();await flush();task.close();await vi.runAllTimersAsync();expect(api.captcha).toHaveBeenCalledTimes(1);
 });
@@ -121,5 +118,16 @@ it('business rate or login messages containing captcha do not trigger retries',a
 it('malformed or gateway-failed writes are verified without repeating the reservation',async()=>{
   for(const kind of ['format','network'] as const){
     const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('unknown result',kind,502);})}});task.start();await flush();expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);expect(api.booked).toHaveBeenCalledTimes(1);
+  }
+});
+it('opening never starts a booking without an explicit start',async()=>{
+  const{task,api}=await setup({ocr:ocr()});await vi.advanceTimersByTimeAsync(60000);
+  expect(task.state.phase).toBe('ready');expect(api.captcha).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
+});
+it('unavailable activities do not prepare OCR resources',async()=>{
+  for(const variant of [{reserved:true},{cancelled:true},{endsAt:NOW},{count:5000,capacity:5000,countKnown:true}]){
+    const engine=ocr(),activity={...await sample(),reserved:false,...variant};
+    await setup({ocr:engine,overrides:{list:vi.fn(async()=>({activities:[activity],offset:0}))}});
+    expect(engine.prepare).not.toHaveBeenCalled();
   }
 });

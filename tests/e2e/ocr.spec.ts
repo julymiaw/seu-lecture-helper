@@ -9,13 +9,13 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';badFirst?:boolean;fullOnRejection?:boolean;rejectFull?:boolean;full?:boolean}={}) {
+async function setup(page:Page, options:{notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
   const initialTime=Date.now();
   let booked=false,writes=0,captchaCalls=0,assetCalls=0;
   const codes:string[]=[];
   const failures:string[]=[];
-  let image='',blank='';
-  let full=Boolean(options.full);
+  let image='';
+  let full=false;
   await page.route('**/*',async route=>{
     const request=route.request(),url=new URL(request.url());
     if(url.origin!==ORIGIN) {
@@ -35,11 +35,10 @@ async function setup(page:Page, options:{notOpenOnce?:boolean;future?:boolean;bl
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(name==='queryActivityList.do') result=data;
-    else if(name==='vcode.do') {captchaCalls++;result={code:0,datas:options.badFirst&&captchaCalls===1?blank:image};}
+    else if(name==='vcode.do') {captchaCalls++;result={code:0,datas:image};}
     else if(name==='addReservation.do') {
       writes++; codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
       if(options.notOpenOnce&&writes===1) result={code:-1,datas:null,msg:'尚未开放预约'};
-      else if(options.rejectFull&&writes===1) {full=true;result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};}
       else if(full)result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
       else if(options.rejectCode&&(writes===1||options.rejectCode==='three'&&writes<=3)){if(options.fullOnRejection&&writes>=2)full=true;result={code:-1,datas:null,msg:'验证码错误，请重试'};}
       else {booked=true;result={code:0,datas:1};}
@@ -52,10 +51,9 @@ async function setup(page:Page, options:{notOpenOnce?:boolean;future?:boolean;bl
     const canvas=document.createElement('canvas');canvas.width=100;canvas.height=36;
     const ctx=canvas.getContext('2d')!;ctx.fillStyle='white';ctx.fillRect(0,0,100,36);ctx.fillStyle='black';ctx.font='bold 26px serif';ctx.fillText('3253',8,27);return canvas.toDataURL('image/jpeg');
   });
-  blank=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=100;c.height=36;const x=c.getContext('2d')!;x.fillStyle='white';x.fillRect(0,0,100,36);return c.toDataURL();});
 
   await page.addScriptTag({content:script});
-  return {writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures,releaseSeat:()=>{full=false;}};
+  return {writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures};
 }
 
 test('installed bundle uses real WASM/model to recognize and submit, with safe diagnostics',async({page,context})=>{

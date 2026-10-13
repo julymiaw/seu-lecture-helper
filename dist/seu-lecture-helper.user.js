@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.4.3
+// @version      0.4.4
 // @description  提前准备验证码、人工修正、到点提交与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -54,11 +54,10 @@ SOFTWARE.
   // src/api.ts
   var BASE = "/gsapp/sys/yddjzxxtjappseu/modules/hdyy/";
   var ApiError = class extends Error {
-    constructor(message2, kind, httpStatus, businessCode) {
+    constructor(message2, kind, httpStatus) {
       super(message2);
       this.kind = kind;
       this.httpStatus = httpStatus;
-      this.businessCode = businessCode;
     }
     feedback;
   };
@@ -78,7 +77,6 @@ SOFTWARE.
       id: String(row.WID),
       title: String(row.JZMC),
       place: String(row.JZDD ?? ""),
-      category: String(row.JZXL_DISPLAY ?? ""),
       startsAt: schoolTime(row.YYKSSJ),
       endsAt: schoolTime(row.YYJSSJ),
       eventStart: String(row.JZSJ ?? ""),
@@ -125,7 +123,7 @@ SOFTWARE.
         }
         if (!body || body.code === void 0) throw new ApiError("\u63A5\u53E3\u54CD\u5E94\u683C\u5F0F\u5DF2\u53D8\u5316", "format");
         if (String(body.code) !== "0") {
-          const error = new ApiError(String(body.msg || "\u9884\u7EA6\u64CD\u4F5C\u672A\u6210\u529F"), "business", httpStatus, Number.isFinite(Number(body.code)) ? Number(body.code) : void 0);
+          const error = new ApiError(String(body.msg || "\u9884\u7EA6\u64CD\u4F5C\u672A\u6210\u529F"), "business", httpStatus);
           const msg = String(body.msg || "").replace(/data:image\/[^\s]+/gi, "[image]").replace(/(?:cookie|authorization|token|password)\s*[:=]\s*[^\s,;]+/gi, "[credential]").replace(/\b\d{4}\b/g, "[digits]").slice(0, 500);
           error.feedback = { code: typeof body.code === "number" ? body.code : String(body.code).slice(0, 32), datas: body.datas === null || typeof body.datas === "number" || typeof body.datas === "boolean" ? body.datas : null, msg };
           throw error;
@@ -174,7 +172,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.4.3";
+  var version = "0.4.4";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -189,7 +187,6 @@ SOFTWARE.
       responseData: error.feedback?.datas === null ? "null" : error.feedback?.datas,
       kind: error.kind,
       httpStatus: error.httpStatus,
-      businessCode: error.businessCode,
       reason: error.kind === "business" ? businessReason(error.message) : error.kind === "network" && error.message.includes("\u8D85\u65F6") ? "timeout" : error.kind
     };
     return { kind: "unexpected" };
@@ -252,11 +249,10 @@ SOFTWARE.
     };
   }
   var Reservation = class {
-    constructor(api, publish, now = Date.now, owns = () => true, ocr) {
+    constructor(api, publish, now = Date.now, ocr) {
       this.api = api;
       this.publish = publish;
       this.now = now;
-      this.owns = owns;
       this.ocr = ocr;
     }
     state = { phase: "closed", message: "" };
@@ -265,12 +261,13 @@ SOFTWARE.
     timer;
     retryTimer;
     wake;
-    offset = 0;
     round = 0;
     submissions = 0;
-    captured = false;
     incomplete = false;
     diagnostics = new Diagnostics();
+    serverNow() {
+      return this.now() + (this.state.offset ?? 0);
+    }
     valid(g) {
       return g === this.generation && this.state.phase !== "closed";
     }
@@ -287,15 +284,11 @@ SOFTWARE.
     bookable() {
       const a = this.state.activity;
       if (!a) return false;
-      if (!this.owns()) {
-        this.stop("\u9884\u7EA6\u4EFB\u52A1\u5DF2\u7531\u5176\u4ED6\u6807\u7B7E\u9875\u63A5\u7BA1");
-        return false;
-      }
       if (a.reserved) {
         this.finish("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
         return false;
       }
-      if (a.cancelled || this.now() + this.offset >= a.endsAt || fullCapacity(this.state)) {
+      if (a.cancelled || this.serverNow() >= a.endsAt || fullCapacity(this.state)) {
         this.stop(a.cancelled ? "\u6D3B\u52A8\u5DF2\u53D6\u6D88" : fullCapacity(this.state) ? "\u5F53\u524D\u6D3B\u52A8\u9884\u7EA6\u4EBA\u6570\u5DF2\u6EE1" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
         return false;
       }
@@ -320,31 +313,29 @@ SOFTWARE.
         if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "failed", ocrMessage: "\u8BC6\u522B\u5F15\u64CE\u4E0D\u53EF\u7528\uFF0C\u8BF7\u586B\u5199\u9A8C\u8BC1\u7801" });
       }
     }
-    async open(id, autoStart = true) {
+    async open(id) {
       const g = ++this.generation;
       this.diagnostics = new Diagnostics();
       this.round = 0;
       this.submissions = 0;
-      this.captured = false;
+      this.incomplete = false;
       this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: 30 };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id });
-      void this.prepareOcr();
       try {
         const data = await this.stage("\u6D3B\u52A8\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
-        let activity2 = data.activities.find((a) => a.id === id);
-        this.offset = data.offset;
+        let activity2 = data.activities.find((a) => a.id === id), offset = data.offset;
         if (!activity2) {
           const detail = await this.stage("\u6D3B\u52A8\u8BE6\u60C5\u67E5\u8BE2", () => this.api.detail(id));
           activity2 = detail.activity;
-          this.offset = detail.offset;
+          offset = detail.offset;
         }
         if (!this.valid(g)) return;
-        this.state = { ...this.state, activity: activity2, offset: this.offset };
+        this.state = { ...this.state, activity: activity2, offset };
         if (!this.bookable()) return;
         this.set("ready", "");
-        if (autoStart) this.start();
+        void this.prepareOcr();
       } catch (error) {
         if (this.valid(g)) this.stop(message(error));
       }
@@ -354,20 +345,16 @@ SOFTWARE.
     }
     start() {
       if (!controls(this.state, this.now()).start || !this.bookable()) return;
-      this.captured = false;
       this.set("waiting", "", { armed: true });
-      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: this.state.leadSeconds, serverOffsetMs: this.offset });
+      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: this.state.leadSeconds, serverOffsetMs: this.state.offset });
       this.tick();
     }
     tick = () => {
       clearTimeout(this.timer);
       if (!this.state.armed || !this.bookable()) return;
-      const remaining = this.state.activity.startsAt - this.now() - this.offset;
+      const remaining = this.state.activity.startsAt - this.serverNow();
       this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
-      if (!this.captured && remaining <= (this.state.leadSeconds ?? 30) * 1e3) {
-        this.captured = true;
-        void this.loadCaptcha();
-      }
+      if (this.round === 0 && remaining <= (this.state.leadSeconds ?? 30) * 1e3) void this.loadCaptcha();
       if (remaining <= 0) {
         if (controls(this.state, this.now()).submit) void this.submit();
         else if (this.incomplete) void this.retryCaptcha();
@@ -386,7 +373,7 @@ SOFTWARE.
       const g = this.generation, epoch = ++this.ocrEpoch;
       this.incomplete = false;
       ++this.round;
-      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, afterOpenMs: this.now() + this.offset - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -418,7 +405,7 @@ SOFTWARE.
           return;
         }
         this.set("input", "", { code });
-        if (this.now() + this.offset >= this.state.activity.startsAt) await this.submit();
+        if (this.serverNow() >= this.state.activity.startsAt) await this.submit();
       } catch {
         if (this.valid(g) && epoch === this.ocrEpoch) await this.ocrFailed();
       }
@@ -428,7 +415,7 @@ SOFTWARE.
         this.set("input", "\u8BC6\u522B\u5F15\u64CE\u4E0D\u53EF\u7528\uFF0C\u8BF7\u586B\u5199\u9A8C\u8BC1\u7801");
         return;
       }
-      if (this.now() + this.offset < this.state.activity.startsAt) {
+      if (this.serverNow() < this.state.activity.startsAt) {
         this.set("input", "\u8BC6\u522B\u5931\u8D25\uFF0C\u53EF\u4FEE\u6539\u9A8C\u8BC1\u7801\uFF1B\u5F00\u653E\u540E\u81EA\u52A8\u6362\u56FE\u91CD\u8BD5");
         this.incomplete = true;
         return;
@@ -447,7 +434,7 @@ SOFTWARE.
       clearTimeout(this.timer);
       const g = this.generation;
       ++this.submissions;
-      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { afterOpenMs: this.now() + this.offset - this.state.activity.startsAt });
+      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { afterOpenMs: this.serverNow() - this.state.activity.startsAt });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
       try {
         await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
@@ -585,7 +572,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get(".challenge").hidden = !state.image || ["success", "failed", "unknown"].includes(state.phase);
       const image = this.get("img"), input = this.get("input");
       const changed = state.image !== this.lastImage;
-      if (state.image !== this.lastImage) {
+      if (changed) {
         this.lastImage = state.image;
         if (state.image) {
           image.src = state.image;
@@ -3506,9 +3493,9 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
   }
 
   // src/ocr.ts
-  function decodeCtc(data, dims, charset, digitsOnly = false) {
+  function decodeCtc(data, dims, charset) {
     if (dims.length !== 3 || dims[1] !== 1 || dims[2] !== charset.length) throw new Error("OCR \u6A21\u578B\u8F93\u51FA\u683C\u5F0F\u4E0D\u5339\u914D");
-    const allowed = charset.map((char, index) => index === 0 || !digitsOnly || /^[0-9]$/.test(char));
+    const allowed = charset.map((char, index) => index === 0 || /^[0-9]$/.test(char));
     let previous = 0, text = "";
     for (let t = 0; t < dims[0]; t++) {
       let best = 0;
@@ -3566,7 +3553,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         const session = this.session;
         const outputs = await session.run({ [session.inputNames[0]]: input });
         try {
-          return decodeCtc(outputs[session.outputNames[0]].data, outputs[session.outputNames[0]].dims, this.charset, true);
+          return decodeCtc(outputs[session.outputNames[0]].data, outputs[session.outputNames[0]].dims, this.charset);
         } finally {
           Object.values(outputs).forEach((output) => output.dispose());
         }
@@ -3622,7 +3609,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           const label = state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : ["captcha-loading", "recognizing", "input", "submitting", "verifying"].includes(state.phase) ? "\u9884\u7EA6\u4E2D" : "";
           mount.setActive(label ? state.activity?.id : void 0, label);
           current?.dialog.render(state);
-        }, Date.now, () => true, ocr);
+        }, Date.now, ocr);
         const dialog = new Dialog({
           submit: () => {
             void task.submit();
@@ -3641,7 +3628,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           hide: () => dialog.hide()
         });
         current = { task, dialog, release };
-        void task.open(id, false);
+        void task.open(id);
       } catch (error) {
         release?.();
         notice(message(error));

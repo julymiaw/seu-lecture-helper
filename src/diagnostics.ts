@@ -11,7 +11,7 @@ export function failureLevel(error: unknown): 'warn' | 'error' {
 export function errorInfo(error: unknown): Fields {
   if (error instanceof ApiError) return {
     serverMessage: error.feedback?.msg, responseCode: error.feedback?.code, responseData: error.feedback?.datas === null ? 'null' : error.feedback?.datas,
-    kind: error.kind, httpStatus: error.httpStatus, businessCode: error.businessCode,
+    kind: error.kind, httpStatus: error.httpStatus,
     reason: error.kind === 'business' ? businessReason(error.message) : error.kind === 'network' && error.message.includes('超时') ? 'timeout' : error.kind,
   };
   return {kind: 'unexpected'};

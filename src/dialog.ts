@@ -37,7 +37,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     this.get('.challenge').hidden=!state.image || ['success','failed','unknown'].includes(state.phase);
     const image=this.get<HTMLImageElement>('img'),input=this.get<HTMLInputElement>('input');
     const changed=state.image!==this.lastImage;
-    if(state.image!==this.lastImage){this.lastImage=state.image;if(state.image){image.src=state.image;this.show();}else image.removeAttribute('src');}
+    if(changed){this.lastImage=state.image;if(state.image){image.src=state.image;this.show();}else image.removeAttribute('src');}
     if(input.value!==(state.code??''))input.value=state.code??'';
     input.disabled=!allowed.edit;if(changed && state.image && allowed.edit)input.focus();
     this.host.dataset.ocr=state.ocrStatus;

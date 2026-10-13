@@ -11,9 +11,9 @@ it('correlates stages and records durations without logging return values', asyn
   expect(JSON.stringify(log.mock.calls)).not.toContain('0733');
 });
 it('logs safe error classifications and rethrows the original error', async () => {
-  const error = new ApiError('验证码错误 secret-cookie data:image/png;base64,SECRET', 'business', 200, 42);
+  const error = new ApiError('验证码错误 secret-cookie data:image/png;base64,SECRET', 'business', 200);
   await expect(new Diagnostics().measure('预约提交', async () => {throw error;})).rejects.toBe(error);
-  expect(vi.mocked(console.warn).mock.calls[0][1]).toMatchObject({kind:'business', reason:'captcha-rejected', httpStatus:200, businessCode:42});
+  expect(vi.mocked(console.warn).mock.calls[0][1]).toMatchObject({kind:'business', reason:'captcha-rejected', httpStatus:200});
   expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('SECRET');
   expect(JSON.stringify(vi.mocked(console.warn).mock.calls)).not.toContain('secret-cookie');
 });
@@ -32,7 +32,7 @@ it('traces a complete reservation without exposing captcha data', async () => {
   const {Reservation} = await import('../src/reservation');
   const {mockApi, NOW, sample} = await import('./helpers');
   const api = await mockApi(); const task = new Reservation(api, vi.fn(), () => NOW);
-  await task.open((await sample()).id);
+  await task.open((await sample()).id); task.start();
   for (let i = 0; i < 8; i++) await Promise.resolve();
   task.editCode('0733'); await task.submit();
   const logs = vi.mocked(console.log).mock.calls.map(call => call[1]);
@@ -48,7 +48,7 @@ it('does not log each countdown tick', async () => {
   vi.setSystemTime(NOW);
   const a = {...await sample(), reserved:false, startsAt:NOW+10000};
   const api = await mockApi({list:vi.fn(async () => ({activities:[a], offset:0}))});
-  const task = new Reservation(api,vi.fn()); await task.open(a.id);
+  const task = new Reservation(api,vi.fn()); await task.open(a.id); task.start();
   for(let i=0;i<10;i++)await Promise.resolve();
   const before = vi.mocked(console.log).mock.calls.length;
   await vi.advanceTimersByTimeAsync(3000);
@@ -78,7 +78,7 @@ it('opening a full activity reports a business warning without a console error',
   const {Reservation}=await import('../src/reservation');const {mockApi,sample,NOW}=await import('./helpers');
   const activity={...await sample(),reserved:false,count:5000,capacity:5000,countKnown:true};
   const api=await mockApi({list:vi.fn(async()=>({activities:[activity],offset:0}))});
-  const task=new Reservation(api,vi.fn(),()=>NOW);await task.open(activity.id,false);
+  const task=new Reservation(api,vi.fn(),()=>NOW);await task.open(activity.id);
   expect(task.state.phase).toBe('failed');expect(console.error).not.toHaveBeenCalled();
   expect(vi.mocked(console.warn).mock.calls.some(call=>call[1]?.event==='状态变化' && call[1]?.reason==='full')).toBe(true);
 });

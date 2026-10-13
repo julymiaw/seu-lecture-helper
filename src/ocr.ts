@@ -1,9 +1,9 @@
 import * as ort from 'onnxruntime-web/wasm';
 import {loadAsset, OCR_ASSETS} from './ocr-assets';
 export interface OcrEngine {prepare(): Promise<void>; recognize(image: string): Promise<string>}
-export function decodeCtc(data: ArrayLike<number>, dims: readonly number[], charset: string[], digitsOnly = false): string {
+export function decodeCtc(data: ArrayLike<number>, dims: readonly number[], charset: string[]): string {
   if (dims.length !== 3 || dims[1] !== 1 || dims[2] !== charset.length) throw new Error('OCR 模型输出格式不匹配');
-  const allowed = charset.map((char,index)=>index===0 || !digitsOnly || /^[0-9]$/.test(char));
+  const allowed = charset.map((char,index)=>index===0 || /^[0-9]$/.test(char));
   let previous = 0, text = '';
   for (let t = 0; t < dims[0]; t++) {
     let best = 0;
@@ -53,7 +53,7 @@ export class BrowserOcr implements OcrEngine {
     try {
       const session = this.session!;
       const outputs = await session.run({[session.inputNames[0]]: input});
-      try {return decodeCtc(outputs[session.outputNames[0]].data as Float32Array, outputs[session.outputNames[0]].dims, this.charset, true);}
+      try {return decodeCtc(outputs[session.outputNames[0]].data as Float32Array, outputs[session.outputNames[0]].dims, this.charset);}
       finally {Object.values(outputs).forEach(output => output.dispose());}
     } finally {input.dispose();}
   }

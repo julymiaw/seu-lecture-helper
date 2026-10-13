@@ -16,7 +16,7 @@
 | 验证码获取、OCR识别、预约提交、预约记录核验 | 开始、完成／失败及 `durationMs` |
 | OCR输出检查 | 输出长度与格式是否合格，不包含识别结果 |
 | 重试与状态变化 | 重试原因、提交次数、最终状态 |
-| `kind`、`reason`、`httpStatus`、`businessCode` | 错误分类及可获得的数字状态码 |
+| `kind`、`reason`、`httpStatus`、`responseCode` | 错误分类、HTTP 状态码及业务返回码；不再重复记录 businessCode |
 | `stale` | 返回时任务或 OCR 已切换，结果不再适用 |
 
 `reason` 中 `captcha-rejected` 表示验证码相关业务提示，`full` 表示满员，`timeout` 表示请求超时，`not-open` 表示未开放，`already-booked` 表示需核验已有预约。业务失败额外记录 `serverMessage`、`responseCode`、`responseData`；消息中的凭据、图片和独立四位数字会替换。不记录异常堆栈或任意响应对象。未知提交结果仍先核验。
