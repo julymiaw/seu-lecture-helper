@@ -16,7 +16,7 @@
 
 ## 使用方法
 
-通过用户脚本发布页面或 [GitHub 安装链接](https://raw.githubusercontent.com/julymiaw/seu-lecture-helper/main/dist/seu-lecture-helper.user.js)安装。两处提供的是同一个脚本，保留一份启用即可。
+通过 [Greasy Fork 发布页](https://greasyfork.org/zh-CN/scripts/599922)或 [GitHub 安装链接](https://raw.githubusercontent.com/julymiaw/seu-lecture-helper/main/dist/seu-lecture-helper.user.js)安装。两个渠道发布同一项目，版本更新可能有时间差；保留一份启用即可。
 
 安装脚本后，登录[东南大学研究生讲座预约系统](https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*default/index.do#/hdyy)，刷新页面，点击活动旁的“预约助手”。
 
