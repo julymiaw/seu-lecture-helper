@@ -64,3 +64,21 @@ it('records concrete business feedback but omits images, credential fields and c
   await expect(new Diagnostics().measure('预约提交',()=>unsafe.submit('id','0733'))).rejects.toBeInstanceOf(ApiError);
   const logs=JSON.stringify(vi.mocked(console.warn).mock.calls);expect(logs).not.toContain('0733');expect(logs).not.toContain('private');expect(logs).not.toContain('SECRET');
 });
+it('uses warnings for expected API failures and errors for malformed or unexpected failures',async()=>{
+  for(const kind of ['business','network','session','rate'] as const){
+    await expect(new Diagnostics().measure('stage',async()=>{throw new ApiError('expected',kind);})).rejects.toBeInstanceOf(ApiError);
+  }
+  expect(console.warn).toHaveBeenCalledTimes(4);expect(console.error).not.toHaveBeenCalled();
+  for(const error of [new ApiError('bad schema','format'),new TypeError('unexpected')]){
+    await expect(new Diagnostics().measure('stage',async()=>{throw error;})).rejects.toBe(error);
+  }
+  expect(console.error).toHaveBeenCalledTimes(2);
+});
+it('opening a full activity reports a business warning without a console error',async()=>{
+  const {Reservation}=await import('../src/reservation');const {mockApi,sample,NOW}=await import('./helpers');
+  const activity={...await sample(),reserved:false,count:5000,capacity:5000,countKnown:true};
+  const api=await mockApi({list:vi.fn(async()=>({activities:[activity],offset:0}))});
+  const task=new Reservation(api,vi.fn(),()=>NOW);await task.open(activity.id,false);
+  expect(task.state.phase).toBe('failed');expect(console.error).not.toHaveBeenCalled();
+  expect(vi.mocked(console.warn).mock.calls.some(call=>call[1]?.event==='状态变化' && call[1]?.reason==='full')).toBe(true);
+});

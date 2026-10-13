@@ -37,7 +37,7 @@ export class Reservation {
   private set(phase:Phase,message:string,extra:Partial<State>={}) {
     const from=this.state.phase;
     this.state={...this.state,...extra,phase,message}; this.publish(this.state);
-    if(from!==phase)this.diagnostics.record(phase==='failed'?'error':phase==='unknown'?'warn':'log','状态变化',{from,phase,round:this.round,submissions:this.submissions,reason:businessReason(message)});
+    if(from!==phase)this.diagnostics.record(['failed','unknown'].includes(phase)?'warn':'log','状态变化',{from,phase,round:this.round,submissions:this.submissions,reason:businessReason(message)});
   }
   private bookable() {
     const a=this.state.activity;

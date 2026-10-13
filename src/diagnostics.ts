@@ -4,6 +4,9 @@ export const VERSION = version;
 type Fields = Record<string, string | number | boolean | undefined>;
 type Level = 'log' | 'warn' | 'error';
 let sequence = 0;
+export function failureLevel(error: unknown): 'warn' | 'error' {
+  return error instanceof ApiError && error.kind !== 'format' ? 'warn' : 'error';
+}
 // Only explicitly selected primitive fields enter the console; never pass requests or errors.
 export function errorInfo(error: unknown): Fields {
   if (error instanceof ApiError) return {
@@ -43,7 +46,7 @@ export class Diagnostics {
       this.record('log', stage + '完成', {...fields, durationMs: Math.round(performance.now() - started), stale: stale()});
       return result;
     } catch (error) {
-      this.record('warn', stage + '失败', {...fields, durationMs: Math.round(performance.now() - started), stale: stale(), ...errorInfo(error)});
+      this.record(failureLevel(error), stage + '失败', {...fields, durationMs: Math.round(performance.now() - started), stale: stale(), ...errorInfo(error)});
       throw error;
     }
   }

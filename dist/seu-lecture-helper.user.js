@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.4.2
+// @version      0.4.3
 // @description  提前准备验证码、人工修正、到点提交与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -174,11 +174,14 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.4.2";
+  var version = "0.4.3";
 
   // src/diagnostics.ts
   var VERSION = version;
   var sequence = 0;
+  function failureLevel(error) {
+    return error instanceof ApiError && error.kind !== "format" ? "warn" : "error";
+  }
   function errorInfo(error) {
     if (error instanceof ApiError) return {
       serverMessage: error.feedback?.msg,
@@ -226,7 +229,7 @@ SOFTWARE.
         this.record("log", stage + "\u5B8C\u6210", { ...fields, durationMs: Math.round(performance.now() - started), stale: stale() });
         return result;
       } catch (error) {
-        this.record("warn", stage + "\u5931\u8D25", { ...fields, durationMs: Math.round(performance.now() - started), stale: stale(), ...errorInfo(error) });
+        this.record(failureLevel(error), stage + "\u5931\u8D25", { ...fields, durationMs: Math.round(performance.now() - started), stale: stale(), ...errorInfo(error) });
         throw error;
       }
     }
@@ -279,7 +282,7 @@ SOFTWARE.
       const from = this.state.phase;
       this.state = { ...this.state, ...extra, phase, message: message2 };
       this.publish(this.state);
-      if (from !== phase) this.diagnostics.record(phase === "failed" ? "error" : phase === "unknown" ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", { from, phase, round: this.round, submissions: this.submissions, reason: businessReason(message2) });
+      if (from !== phase) this.diagnostics.record(["failed", "unknown"].includes(phase) ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", { from, phase, round: this.round, submissions: this.submissions, reason: businessReason(message2) });
     }
     bookable() {
       const a = this.state.activity;
