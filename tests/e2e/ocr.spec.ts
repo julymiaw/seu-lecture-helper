@@ -9,11 +9,11 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{future?:boolean;blocked?:boolean;rejectCode?:boolean;rejectFull?:boolean;mode?:'manual'|'ocr';full?:boolean}={}) {
+async function setup(page:Page, options:{future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';badFirst?:boolean;rejectFull?:boolean;mode?:'manual'|'ocr';full?:boolean}={}) {
   let booked=false,writes=0,captchaCalls=0,assetCalls=0;
   const codes:string[]=[];
   const failures:string[]=[];
-  let image='';
+  let image='',blank='';
   let full=Boolean(options.full);
   await page.route('**/*',async route=>{
     const request=route.request(),url=new URL(request.url());
@@ -34,11 +34,11 @@ async function setup(page:Page, options:{future?:boolean;blocked?:boolean;reject
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(name==='queryActivityList.do') result=data;
-    else if(name==='vcode.do') {captchaCalls++;result={code:0,datas:image};}
+    else if(name==='vcode.do') {captchaCalls++;result={code:0,datas:options.badFirst&&captchaCalls===1?blank:image};}
     else if(name==='addReservation.do') {
       writes++; codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
       if(options.rejectFull&&writes===1) {full=true;result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};}
-      else if(options.rejectCode&&writes===1) result={code:-1,datas:null,msg:'验证码错误，请重试'};
+      else if(options.rejectCode&&(writes===1||options.rejectCode==='three'&&writes<=3)) result={code:-1,datas:null,msg:'验证码错误，请重试'};
       else {booked=true;result={code:0,datas:1};}
     } else if(name==='queryMyActivityList.do') result={code:0,datas:{wdhdList:booked?[{HD_WID:raw.datas.hdlbList[0].WID,YY_WID:'fixture-id',FBZT:'1'}]:[]}};
     else {failures.push(name!);return route.abort();}
@@ -49,6 +49,7 @@ async function setup(page:Page, options:{future?:boolean;blocked?:boolean;reject
     const canvas=document.createElement('canvas');canvas.width=100;canvas.height=36;
     const ctx=canvas.getContext('2d')!;ctx.fillStyle='white';ctx.fillRect(0,0,100,36);ctx.fillStyle='black';ctx.font='bold 26px serif';ctx.fillText('3253',8,27);return canvas.toDataURL('image/jpeg');
   });
+  blank=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=100;c.height=36;const x=c.getContext('2d')!;x.fillStyle='white';x.fillRect(0,0,100,36);return c.toDataURL();});
   if(options.mode) await page.evaluate(mode=>localStorage.setItem('seu-lecture-helper-input-mode',mode),options.mode);
   await page.addScriptTag({content:script});
   return {writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures,releaseSeat:()=>{full=false;}};
@@ -103,12 +104,17 @@ test('unavailable OCR falls back to focused manual input and retains the challen
   await expect(page.getByRole('status')).toContainText('已核验'); expect(state.writes()).toBe(1); expect(state.captchaCalls()).toBe(1); expect(state.failures).toEqual([]);
 });
 
-test('OCR captcha rejection gets a new image but does not automatically resubmit',async({page})=>{
-  const state=await setup(page,{rejectCode:true}); await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('已更新验证码',{timeout:20000});
-  expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(2);await expect(page.getByRole('radio',{name:'手动输入'})).toBeChecked();
-  const input=page.getByLabel('验证码',{exact:true});await input.fill('3253');await input.press('Enter');
-  await expect(page.getByRole('status')).toContainText('已核验');expect(state.writes()).toBe(2);expect(state.failures).toEqual([]);
+test('OCR captcha rejection replaces the image and completes automatically',async({page})=>{
+  const state=await setup(page,{rejectCode:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
+  expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
+});
+
+for(const mode of ['scheduled','monitor'] as const)test(`unattended ${mode} replaces an unreadable challenge and books automatically`,async({page})=>{
+  const state=await setup(page,{badFirst:true});await page.getByRole('button',{name:'预约助手'}).first().click();
+  if(mode==='monitor')await page.getByRole('radio',{name:'余位监测'}).check();
+  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
+  expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(2);expect(state.codes).toEqual(['3253']);expect(state.failures).toEqual([]);
 });
 
 test('monitoring prewarms real OCR without a challenge, then books a released seat and stops',async({page})=>{
@@ -141,7 +147,7 @@ test('manual-to-OCR full rejection clears the old challenge and remains recovera
 });
 
 for(const failure of ['resource','captcha'] as const)test(`monitoring unlocks manual input after ${failure} failure and can complete booking`,async({page})=>{
-  const state=await setup(page,{mode:'manual',full:true,blocked:failure==='resource',rejectCode:failure==='captcha'});
+  const state=await setup(page,{mode:'manual',full:true,blocked:failure==='resource',rejectCode:failure==='captcha'?'three':false});
   await page.getByRole('button',{name:'预约助手'}).first().click();await page.getByRole('button',{name:'开始监测'}).click();
   await expect(page.getByRole('button',{name:'立即检查'})).toBeEnabled();
   if(failure==='captcha'){
@@ -152,7 +158,7 @@ for(const failure of ['resource','captcha'] as const)test(`monitoring unlocks ma
   await expect(page.getByRole('radio',{name:'手动输入'})).toBeChecked({timeout:20000});
   await expect(page.getByRole('radio',{name:'手动输入'})).toBeEnabled();await expect(page.getByLabel('验证码',{exact:true})).toBeFocused();
   await expect(page.getByRole('button',{name:'立即检查'})).not.toBeVisible();
-  expect(state.writes()).toBe(failure==='captcha'?1:0);
+  expect(state.writes()).toBe(failure==='captcha'?3:0);
   await page.getByLabel('验证码',{exact:true}).fill('3253');await page.getByLabel('验证码',{exact:true}).press('Enter');
-  await expect(page.getByRole('status')).toContainText('已核验');expect(state.writes()).toBe(failure==='captcha'?2:1);expect(state.failures).toEqual([]);
+  await expect(page.getByRole('status')).toContainText('已核验');expect(state.writes()).toBe(failure==='captcha'?4:1);expect(state.failures).toEqual([]);
 });

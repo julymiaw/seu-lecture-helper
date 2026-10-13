@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.3.3
+// @version      0.3.4
 // @description  倒计时预约、低频余位监测、本地 OCR／手动验证码与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -203,6 +203,7 @@ SOFTWARE.
     offset = 0;
     ocrEpoch = 0;
     autoSubmitted = false;
+    ocrAttempts = 0;
     mode;
     scheduledMode;
     checking = false;
@@ -217,7 +218,10 @@ SOFTWARE.
     setMode(mode) {
       const allowed = controls(this.state, this.now());
       if (!allowed.mode || mode === "manual" && !allowed.manual) return;
-      if (mode === "ocr" && this.mode !== "ocr") this.autoSubmitted = false;
+      if (mode === "ocr" && this.mode !== "ocr") {
+        this.autoSubmitted = false;
+        this.ocrAttempts = 0;
+      }
       this.mode = mode;
       ++this.ocrEpoch;
       if (this.state.taskMode !== "monitor") this.scheduledMode = mode;
@@ -251,6 +255,7 @@ SOFTWARE.
       this.set(this.state.phase === "recognizing" ? "input" : this.state.phase, text, { mode: "manual", manualFallback: this.state.taskMode === "monitor" });
     }
     inputForTask(taskMode) {
+      this.ocrAttempts = 0;
       this.mode = taskMode === "monitor" ? "ocr" : this.scheduledMode;
       ++this.ocrEpoch;
       return { mode: this.mode, manualFallback: false };
@@ -258,20 +263,38 @@ SOFTWARE.
     async recognize(image) {
       if (!this.ocr || this.mode !== "ocr" || this.autoSubmitted || !controls(this.state, this.now()).submit) return;
       const g = this.generation, epoch = ++this.ocrEpoch;
+      ++this.ocrAttempts;
       this.set("recognizing", "\u6B63\u5728\u672C\u5730\u8BC6\u522B\u9A8C\u8BC1\u7801\uFF1B\u53EF\u5207\u6362\u4E3A\u624B\u52A8\u8F93\u5165");
       try {
         const code = (await this.ocr.recognize(image)).trim();
         if (!this.valid(g) || epoch !== this.ocrEpoch || this.mode !== "ocr" || this.state.image !== image || this.state.phase !== "recognizing") return;
         if (!/^[a-z0-9]{4}$/i.test(code)) {
-          this.manual("\u672A\u8BC6\u522B\u51FA\u5B8C\u6574\u7684 4 \u4F4D\u9A8C\u8BC1\u7801\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165");
+          await this.retryOcr("\u672A\u8BC6\u522B\u51FA\u5B8C\u6574\u7684 4 \u4F4D\u9A8C\u8BC1\u7801");
           return;
         }
         this.autoSubmitted = true;
         this.set("input", "\u9A8C\u8BC1\u7801\u8BC6\u522B\u5B8C\u6210\uFF0C\u6B63\u5728\u63D0\u4EA4");
         await this.submit(code);
       } catch {
-        if (this.valid(g) && epoch === this.ocrEpoch) this.manual("\u81EA\u52A8\u8BC6\u522B\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165\u9A8C\u8BC1\u7801");
+        if (this.valid(g) && epoch === this.ocrEpoch) await this.retryOcr("\u81EA\u52A8\u8BC6\u522B\u5931\u8D25");
       }
+    }
+    async retryOcr(reason, rejected = false) {
+      if (this.ocrAttempts >= 3 || this.state.ocrStatus === "failed") {
+        this.manual(`${reason}\uFF0C\u81EA\u52A8\u5C1D\u8BD5\u5DF2\u505C\u6B62\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165`);
+        if (rejected) {
+          this.set("input", this.state.message, { image: void 0 });
+          await this.loadCaptcha();
+        }
+        return;
+      }
+      const g = this.generation;
+      this.autoSubmitted = false;
+      this.set("captcha-loading", `${reason}\uFF0C1 \u79D2\u540E\u6362\u56FE\u91CD\u8BD5\uFF08${this.ocrAttempts + 1}/3\uFF09`, { image: void 0 });
+      await this.wait(1e3);
+      if (!this.valid(g)) return;
+      this.set("input", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801");
+      await this.loadCaptcha();
     }
     allowed() {
       if (this.owns()) return true;
@@ -290,6 +313,7 @@ SOFTWARE.
     async open(id, autoStart = true) {
       const g = ++this.generation;
       this.autoSubmitted = false;
+      this.ocrAttempts = 0;
       this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", mode: this.mode, taskMode: "scheduled", interval: 60, followUp: false };
       this.publish(this.state);
       if (this.mode === "ocr") void this.prepareOcr();
@@ -449,6 +473,7 @@ SOFTWARE.
           return;
         }
         this.autoSubmitted = false;
+        this.ocrAttempts = 0;
         await this.loadCaptcha();
       } catch (error) {
         if (!this.valid(g) || this.state.phase !== "monitoring") return;
@@ -525,7 +550,10 @@ SOFTWARE.
         if (!this.valid(g)) return;
         if (error instanceof ApiError && error.kind === "business") {
           if (error.message.includes("\u9A8C\u8BC1\u7801")) {
-            if (this.mode === "ocr") this.manual("\u9A8C\u8BC1\u7801\u672A\u901A\u8FC7\uFF0C\u8BF7\u624B\u52A8\u8F93\u5165\u65B0\u9A8C\u8BC1\u7801");
+            if (this.mode === "ocr") {
+              await this.retryOcr(error.message, true);
+              return;
+            }
             this.set("input", error.message, { image: void 0 });
             await this.loadCaptcha();
             if (this.state.phase === "input") this.set("input", error.message + " \u5DF2\u66F4\u65B0\u9A8C\u8BC1\u7801");
@@ -3863,7 +3891,7 @@ button:disabled{opacity:.5;cursor:default}.primary{background:#287547;color:whit
       }
     };
     notice2 = notice, close2 = close;
-    document.documentElement.setAttribute("data-seu-lecture-helper", "0.3.3");
+    document.documentElement.setAttribute("data-seu-lecture-helper", "0.3.4");
     const api = new Api();
     const ocr = new BrowserOcr();
     let current;

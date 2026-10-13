@@ -35,6 +35,7 @@ export class Reservation {
   private offset = 0;
   private ocrEpoch = 0;
   private autoSubmitted = false;
+  private ocrAttempts = 0;
   private mode: InputMode;
   private scheduledMode: InputMode;
   private checking = false;
@@ -47,8 +48,7 @@ export class Reservation {
   setMode(mode: InputMode) {
     const allowed = controls(this.state, this.now());
     if (!allowed.mode || mode === 'manual' && !allowed.manual) return;
-    // Explicitly re-enabling OCR permits one new attempt; errors alone never loop.
-    if (mode === 'ocr' && this.mode !== 'ocr') this.autoSubmitted = false;
+    if (mode === 'ocr' && this.mode !== 'ocr') {this.autoSubmitted = false; this.ocrAttempts = 0;}
     this.mode = mode; ++this.ocrEpoch;
     if (this.state.taskMode !== 'monitor') this.scheduledMode = mode;
     const phase = this.state.phase === 'recognizing' ? 'input' : this.state.phase;
@@ -77,23 +77,39 @@ export class Reservation {
     this.set(this.state.phase === 'recognizing' ? 'input' : this.state.phase, text, {mode: 'manual', manualFallback: this.state.taskMode === 'monitor'});
   }
   private inputForTask(taskMode: TaskMode): Partial<State> {
+    this.ocrAttempts = 0;
     this.mode = taskMode === 'monitor' ? 'ocr' : this.scheduledMode; ++this.ocrEpoch;
     return {mode: this.mode, manualFallback: false};
   }
   private async recognize(image: string) {
     if (!this.ocr || this.mode !== 'ocr' || this.autoSubmitted || !controls(this.state, this.now()).submit) return;
     const g = this.generation, epoch = ++this.ocrEpoch;
+    ++this.ocrAttempts;
     this.set('recognizing', '正在本地识别验证码；可切换为手动输入');
     try {
       const code = (await this.ocr.recognize(image)).trim();
       if (!this.valid(g) || epoch !== this.ocrEpoch || this.mode !== 'ocr' || this.state.image !== image || this.state.phase !== 'recognizing') return;
-      if (!/^[a-z0-9]{4}$/i.test(code)) {this.manual('未识别出完整的 4 位验证码，请手动输入'); return;}
+      if (!/^[a-z0-9]{4}$/i.test(code)) {await this.retryOcr('未识别出完整的 4 位验证码'); return;}
       this.autoSubmitted = true;
       this.set('input', '验证码识别完成，正在提交');
       await this.submit(code);
     } catch {
-      if (this.valid(g) && epoch === this.ocrEpoch) this.manual('自动识别失败，请手动输入验证码');
+      if (this.valid(g) && epoch === this.ocrEpoch) await this.retryOcr('自动识别失败');
     }
+  }
+  private async retryOcr(reason: string, rejected = false) {
+    if (this.ocrAttempts >= 3 || this.state.ocrStatus === 'failed') {
+      this.manual(`${reason}，自动尝试已停止，请手动输入`);
+      if (rejected) {this.set('input', this.state.message, {image: undefined}); await this.loadCaptcha();}
+      return;
+    }
+    const g = this.generation;
+    this.autoSubmitted = false;
+    this.set('captcha-loading', `${reason}，1 秒后换图重试（${this.ocrAttempts + 1}/3）`, {image: undefined});
+    await this.wait(1000);
+    if (!this.valid(g)) return;
+    this.set('input', '正在更新验证码');
+    await this.loadCaptcha();
   }
   private allowed() {
     if (this.owns()) return true;
@@ -105,6 +121,7 @@ export class Reservation {
   async open(id: string, autoStart = true) {
     const g = ++this.generation;
     this.autoSubmitted = false;
+    this.ocrAttempts = 0;
     this.state = {phase: 'loading', message: '正在获取活动信息', mode: this.mode, taskMode: 'scheduled', interval: 60, followUp: false}; this.publish(this.state);
     if (this.mode === 'ocr') void this.prepareOcr();
     try {
@@ -202,6 +219,7 @@ export class Reservation {
       if (!knownCount(item)) {this.scheduleMonitor(this.jitter(), '人数数据暂不完整，等待下一次检查'); return;}
       if (item.count >= item.capacity) {this.scheduleMonitor(this.jitter(), '正在等待空余名额'); return;}
       this.autoSubmitted = false;
+      this.ocrAttempts = 0;
       await this.loadCaptcha();
     } catch (error) {
       if (!this.valid(g) || this.state.phase !== 'monitoring') return;
@@ -256,7 +274,7 @@ export class Reservation {
       if (!this.valid(g)) return;
       if (error instanceof ApiError && error.kind === 'business') {
         if (error.message.includes('验证码')) {
-          if (this.mode === 'ocr') this.manual('验证码未通过，请手动输入新验证码');
+          if (this.mode === 'ocr') {await this.retryOcr(error.message, true); return;}
           this.set('input', error.message, {image: undefined});
           await this.loadCaptcha();
           if (this.state.phase === 'input') this.set('input', error.message + ' 已更新验证码');

@@ -26,9 +26,10 @@ describe('reservation controls and transitions',()=>{
     if(failure==='recognition')ocr.recognize.mockResolvedValue('123');
     if(failure==='captcha')api.submit.mockRejectedValue(new ApiError('验证码错误','business'));
     task.configure({taskMode:'monitor'});task.start();await flush();
+    await vi.advanceTimersByTimeAsync(2000);await flush();
     expect(task.state).toMatchObject({phase:'input',mode:'manual',manualFallback:true});
-    expect(controls(task.state).manual).toBe(true);expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?1:0);
-    await vi.advanceTimersByTimeAsync(120000);expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?1:0);task.close();
+    expect(controls(task.state).manual).toBe(true);expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?3:0);
+    await vi.advanceTimersByTimeAsync(120000);expect(api.submit).toHaveBeenCalledTimes(failure==='captcha'?3:0);task.close();
   });
   it('a full event cannot select scheduled booking, fetch captcha or submit through any entry point',async()=>{
     const {task,api}=await setup(true);expect(controls(task.state).scheduled).toBe(false);
