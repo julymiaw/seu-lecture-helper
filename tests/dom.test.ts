@@ -78,7 +78,7 @@ describe('cross-tab task lock', () => {
 
 
 describe('unified captcha dialog',()=>{
-  const actions=()=>({submit:vi.fn(),edit:vi.fn(),refresh:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),configure:vi.fn(),hide:vi.fn(),reload:vi.fn()});
+  const actions=()=>({submit:vi.fn(),edit:vi.fn(),refresh:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),configure:vi.fn(),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()});
   it('shows OCR text and image together and sends human edits to task state',async()=>{
     const a=actions(),d=new Dialog(a),activity={...await sample(),reserved:false,startsAt:NOW+10000};
     d.render({phase:'input',activity,message:'',armed:true,image:'data:image/png;base64,AA==',code:'0733',remaining:10000});

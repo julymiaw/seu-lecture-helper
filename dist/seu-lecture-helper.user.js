@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.4.4
-// @description  提前准备验证码、人工修正、到点提交与结果核验
+// @version      0.5.0
+// @description  提前准备验证码、人工修正、会话检查与登录恢复、到点提交与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
 // @run-at       document-idle
@@ -172,7 +172,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.4.4";
+  var version = "0.5.0";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -264,6 +264,10 @@ SOFTWARE.
     round = 0;
     submissions = 0;
     incomplete = false;
+    targetId;
+    nextSessionCheck = 0;
+    sessionChecking = false;
+    expectedTickAt;
     diagnostics = new Diagnostics();
     serverNow() {
       return this.now() + (this.state.offset ?? 0);
@@ -279,7 +283,7 @@ SOFTWARE.
       const from = this.state.phase;
       this.state = { ...this.state, ...extra, phase, message: message2 };
       this.publish(this.state);
-      if (from !== phase) this.diagnostics.record(["failed", "unknown"].includes(phase) ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", { from, phase, round: this.round, submissions: this.submissions, reason: businessReason(message2) });
+      if (from !== phase) this.diagnostics.record(["failed", "unknown", "login-required"].includes(phase) ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", { from, phase, round: this.round, submissions: this.submissions, reason: businessReason(message2) });
     }
     bookable() {
       const a = this.state.activity;
@@ -313,13 +317,16 @@ SOFTWARE.
         if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "failed", ocrMessage: "\u8BC6\u522B\u5F15\u64CE\u4E0D\u53EF\u7528\uFF0C\u8BF7\u586B\u5199\u9A8C\u8BC1\u7801" });
       }
     }
-    async open(id) {
+    async open(id, recovery) {
+      this.targetId = id;
       const g = ++this.generation;
       this.diagnostics = new Diagnostics();
       this.round = 0;
       this.submissions = 0;
       this.incomplete = false;
-      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: 30 };
+      this.sessionChecking = false;
+      this.expectedTickAt = void 0;
+      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: recovery?.leadSeconds ?? 30, verifyAfterLogin: recovery?.verify };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id });
       try {
@@ -337,7 +344,10 @@ SOFTWARE.
         this.set("ready", "");
         void this.prepareOcr();
       } catch (error) {
-        if (this.valid(g)) this.stop(message(error));
+        if (this.valid(g)) {
+          if (error instanceof ApiError && error.kind === "session") this.requireLogin();
+          else this.stop(message(error));
+        }
       }
     }
     configure(leadSeconds) {
@@ -345,22 +355,72 @@ SOFTWARE.
     }
     start() {
       if (!controls(this.state, this.now()).start || !this.bookable()) return;
+      this.nextSessionCheck = this.now() + 6e4;
       this.set("waiting", "", { armed: true });
       this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: this.state.leadSeconds, serverOffsetMs: this.state.offset });
       this.tick();
     }
+    requireLogin() {
+      ++this.generation;
+      ++this.ocrEpoch;
+      clearTimeout(this.timer);
+      clearTimeout(this.retryTimer);
+      this.wake?.();
+      this.wake = void 0;
+      this.set("login-required", "\u767B\u5F55\u5DF2\u5931\u6548\uFF1B\u767B\u5F55\u540E\u6062\u590D\u4EFB\u52A1", { image: void 0, code: "", remaining: void 0, verifyAfterLogin: ["submitting", "verifying", "unknown"].includes(this.state.phase) || this.state.verifyAfterLogin });
+    }
+    async resume() {
+      if (this.state.phase !== "login-required" || !this.targetId) return;
+      const activity2 = this.state.activity, id = this.targetId, lead = this.state.leadSeconds ?? 30, verify = this.state.verifyAfterLogin;
+      await this.open(id, { leadSeconds: lead, verify: Boolean(verify) });
+      if (this.state.phase === "login-required") this.set("login-required", this.state.message, { activity: activity2, leadSeconds: lead, armed: true, verifyAfterLogin: verify });
+      else if (verify) await this.restoreVerification();
+      else if (this.state.phase === "ready") {
+        this.configure(lead);
+        this.start();
+      }
+    }
+    async restoreVerification() {
+      if (!this.state.activity || this.state.phase === "closed") return;
+      this.set("unknown", "\u6062\u590D\u540E\u5148\u6838\u9A8C\u4E4B\u524D\u7684\u63D0\u4EA4\u7ED3\u679C", { armed: false });
+      await this.verify();
+    }
+    async checkSession() {
+      const g = this.generation;
+      try {
+        await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.captcha());
+      } catch (error) {
+        if (!this.valid(g)) return;
+        if (error instanceof ApiError && error.kind === "session") this.requireLogin();
+        else if (error instanceof ApiError && error.kind === "rate") this.stop(message(error));
+        else this.diagnostics.record("warn", "\u767B\u5F55\u68C0\u67E5\u672A\u786E\u8BA4\uFF0C\u4FDD\u7559\u539F\u5B9A\u65F6", { ...errorInfo(error) });
+      } finally {
+        if (this.valid(g)) {
+          this.sessionChecking = false;
+          if (this.state.armed && this.round === 0) this.tick();
+        }
+      }
+    }
     tick = () => {
       clearTimeout(this.timer);
+      if (this.expectedTickAt !== void 0 && this.now() - this.expectedTickAt > 1e3) this.diagnostics.record("warn", "\u8BA1\u65F6\u56DE\u8C03\u5EF6\u8FDF", { delayMs: this.now() - this.expectedTickAt, visibility: document.visibilityState });
       if (!this.state.armed || !this.bookable()) return;
       const remaining = this.state.activity.startsAt - this.serverNow();
       this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
-      if (this.round === 0 && remaining <= (this.state.leadSeconds ?? 30) * 1e3) void this.loadCaptcha();
+      if (this.round === 0 && !this.sessionChecking && this.now() >= this.nextSessionCheck && remaining > ((this.state.leadSeconds ?? 30) + 20) * 1e3) {
+        this.nextSessionCheck = this.now() + 6e4;
+        this.sessionChecking = true;
+        void this.checkSession();
+      }
+      if (this.round === 0 && !this.sessionChecking && remaining <= (this.state.leadSeconds ?? 30) * 1e3) void this.loadCaptcha();
       if (remaining <= 0) {
         if (controls(this.state, this.now()).submit) void this.submit();
         else if (this.incomplete) void this.retryCaptcha();
         return;
       }
-      this.timer = setTimeout(this.tick, Math.min(250, remaining));
+      const delay = Math.min(250, remaining);
+      this.expectedTickAt = this.now() + delay;
+      this.timer = setTimeout(this.tick, delay);
     };
     editCode(code) {
       if (!controls(this.state, this.now()).edit) return;
@@ -373,7 +433,7 @@ SOFTWARE.
       const g = this.generation, epoch = ++this.ocrEpoch;
       this.incomplete = false;
       ++this.round;
-      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedCaptureAt: new Date(this.state.activity.startsAt - (this.state.offset ?? 0) - (this.state.leadSeconds ?? 30) * 1e3).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + (this.state.leadSeconds ?? 30) * 1e3, serverOffsetMs: this.state.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -384,6 +444,10 @@ SOFTWARE.
           return;
         } catch (error) {
           if (!this.valid(g)) return;
+          if (error instanceof ApiError && error.kind === "session") {
+            this.requireLogin();
+            return;
+          }
           if (!(error instanceof ApiError) || error.kind !== "network" || attempt === 2) {
             this.stop(message(error));
             return;
@@ -441,7 +505,11 @@ SOFTWARE.
         this.diagnostics.record("log", "\u670D\u52A1\u7AEF\u62A5\u544A\u9884\u7EA6\u6210\u529F", { responseCode: 0, responseData: 1 });
       } catch (error) {
         if (!this.valid(g)) return;
-        if (error instanceof ApiError && ["session", "rate"].includes(error.kind)) {
+        if (error instanceof ApiError && error.kind === "session") {
+          this.requireLogin();
+          return;
+        }
+        if (error instanceof ApiError && error.kind === "rate") {
           this.stop(message(error));
           return;
         }
@@ -491,7 +559,11 @@ SOFTWARE.
           detail = "\u6682\u672A\u67E5\u5230\u9884\u7EA6\u8BB0\u5F55";
         } catch (error) {
           detail = message(error);
-          if (error instanceof ApiError && ["session", "rate"].includes(error.kind)) break;
+          if (error instanceof ApiError && error.kind === "session") {
+            if (this.valid(g)) this.requireLogin();
+            return;
+          }
+          if (error instanceof ApiError && error.kind === "rate") break;
         }
       }
       if (this.valid(g)) this.finish("unknown", "\u7ED3\u679C\u5F85\u786E\u8BA4\uFF1A" + detail + "\u3002\u8BF7\u91CD\u65B0\u6838\u9A8C\uFF0C\u4E0D\u8981\u76F4\u63A5\u91CD\u590D\u63D0\u4EA4\u3002");
@@ -530,7 +602,7 @@ SOFTWARE.
 h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
 .challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}input{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}input:focus{outline:2px solid #287547;outline-offset:2px}
 p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}#hide{margin-left:auto}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}input{font-size:24px;letter-spacing:4px}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
+</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
       this.panel = this.get("dialog");
       this.get("form").addEventListener("submit", (e) => {
         e.preventDefault();
@@ -538,7 +610,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       });
       this.get("input").addEventListener("input", () => actions.edit(this.get("input").value));
       this.get("#lead").addEventListener("change", () => actions.configure(Number(this.get("#lead").value)));
-      for (const id of ["start", "refresh", "verify", "reload", "hide", "close"]) this.get("#" + id).addEventListener("click", () => actions[id]());
+      for (const id of ["start", "refresh", "verify", "reload", "hide", "close", "login", "resume"]) this.get("#" + id).addEventListener("click", () => actions[id]());
       this.panel.addEventListener("cancel", (e) => {
         e.preventDefault();
         actions.close();
@@ -590,13 +662,15 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get("[type=submit]").disabled = !allowed.submit;
       this.get("#refresh").hidden = !state.image;
       this.get("#refresh").disabled = !allowed.refresh;
+      this.get("#login").hidden = state.phase !== "login-required";
+      this.get("#resume").hidden = state.phase !== "login-required";
       this.get("#verify").hidden = state.phase !== "unknown";
       this.get("#reload").hidden = state.phase !== "success";
       this.get("#hide").hidden = !state.armed || ["submitting", "verifying"].includes(state.phase);
       this.get("#close").disabled = !allowed.close;
       this.get("#preparation").hidden = state.ocrStatus !== "failed";
       this.get("#preparation").textContent = state.ocrMessage ?? "";
-      if (["success", "failed", "unknown"].includes(state.phase)) this.show();
+      if (["success", "failed", "unknown", "login-required"].includes(state.phase)) this.show();
     }
   };
 
@@ -3563,6 +3637,34 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     }
   };
 
+  // src/task-store.ts
+  var KEY = "seu-lecture-pending-task";
+  function saveTask(state, storage = sessionStorage) {
+    if (!state.activity || ["loading", "ready", "closed"].includes(state.phase)) return;
+    try {
+      if (["success", "failed"].includes(state.phase)) {
+        storage.removeItem(KEY);
+        return;
+      }
+      if (state.armed || ["submitting", "verifying", "unknown"].includes(state.phase)) storage.setItem(KEY, JSON.stringify({ id: state.activity.id, leadSeconds: state.leadSeconds ?? 30, endsAt: state.activity.endsAt, verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase)) }));
+    } catch {
+    }
+  }
+  function readTask(storage = sessionStorage) {
+    try {
+      const task = JSON.parse(storage.getItem(KEY) ?? "null");
+      if (task && typeof task.id === "string" && [10, 20, 30, 60].includes(task.leadSeconds) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && task.endsAt > Date.now()) return task;
+      storage.removeItem(KEY);
+    } catch {
+    }
+  }
+  function clearTask(storage = sessionStorage) {
+    try {
+      storage.removeItem(KEY);
+    } catch {
+    }
+  }
+
   // src/main.ts
   if (!document.documentElement.hasAttribute("data-seu-lecture-helper")) {
     let notice = function(text) {
@@ -3574,11 +3676,12 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       item.style.cssText = "position:fixed;bottom:30px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#234d35;color:white;padding:14px;border-radius:10px;max-width:80vw";
       document.body.append(item);
       setTimeout(() => item.remove(), 6e3);
-    }, close = function() {
+    }, close = function(clear = true) {
       if (current?.task.close()) {
         current.dialog.destroy();
         current.release();
         current = void 0;
+        if (clear) clearTask();
       }
     };
     notice2 = notice, close2 = close;
@@ -3587,7 +3690,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     const ocr = new BrowserOcr();
     let current;
     let opening = false;
-    async function open(id) {
+    async function open(id, recovery) {
       if (current?.task.state.activity?.id === id) {
         current.dialog.show();
         return;
@@ -3605,6 +3708,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           return;
         }
         const task = new Reservation(api, (state) => {
+          saveTask(state);
           if (state.activity && state.phase !== "closed") mount.setReserved(state.activity.id, state.activity.reserved);
           const label = state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : ["captcha-loading", "recognizing", "input", "submitting", "verifying"].includes(state.phase) ? "\u9884\u7EA6\u4E2D" : "";
           mount.setActive(label ? state.activity?.id : void 0, label);
@@ -3621,14 +3725,27 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           verify: () => {
             void task.verify();
           },
-          close,
+          resume: () => {
+            void task.resume();
+          },
+          login: () => {
+            location.reload();
+          },
+          close: () => close(),
           reload: () => location.reload(),
           start: () => task.start(),
           configure: (seconds) => task.configure(seconds),
           hide: () => dialog.hide()
         });
         current = { task, dialog, release };
-        void task.open(id);
+        await task.open(id, recovery);
+        if (recovery && task.state.phase !== "login-required") {
+          if (recovery.verify) await task.restoreVerification();
+          else if (task.state.phase === "ready") {
+            task.configure(recovery.leadSeconds);
+            task.start();
+          }
+        }
       } catch (error) {
         release?.();
         notice(message(error));
@@ -3638,11 +3755,13 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     }
     const mount = new Mount(api, (id) => {
       void open(id);
-    }, close);
+    }, () => close());
     mount.start();
+    const pending = readTask();
+    if (pending) void open(pending.id, pending);
     window.addEventListener("pagehide", () => {
       mount.stop();
-      close();
+      close(false);
     });
     window.addEventListener("pageshow", (event) => {
       if (event.persisted) mount.start();

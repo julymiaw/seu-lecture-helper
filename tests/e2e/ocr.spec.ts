@@ -9,7 +9,7 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
+async function setup(page:Page, options:{expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
   const initialTime=Date.now();
   let booked=false,writes=0,captchaCalls=0,assetCalls=0;
   const codes:string[]=[];
@@ -35,7 +35,7 @@ async function setup(page:Page, options:{notOpenOnce?:boolean;future?:boolean;bl
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(name==='queryActivityList.do') result=data;
-    else if(name==='vcode.do') {captchaCalls++;result={code:0,datas:image};}
+    else if(name==='vcode.do') {captchaCalls++;if(options.expireProbeOnce&&captchaCalls===1)return route.fulfill({status:401,body:'unauthorized'});result={code:0,datas:image};}
     else if(name==='addReservation.do') {
       writes++; codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
       if(options.notOpenOnce&&writes===1) result={code:-1,datas:null,msg:'尚未开放预约'};
@@ -110,4 +110,19 @@ test('compact dialog fits a narrow viewport and reopen retains the answer',async
 test('not-open boundary refreshes captcha before submitting again',async({page})=>{
   const state=await setup(page,{notOpenOnce:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
   await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
+});
+
+test('refresh restores the waiting task without another start click',async({page})=>{
+  await page.clock.install();const state=await setup(page,{future:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
+  await page.reload();await page.addScriptTag({content:script});await expect(page.locator('#seu-lecture-helper-dialog')).toBeAttached();await expect(page.locator('#start')).toBeHidden();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3601000);
+  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);
+});
+test('expired session pauses, refresh returns to the saved task, and fresh captcha completes booking',async({page})=>{
+  await page.clock.install();const state=await setup(page,{future:true,expireProbeOnce:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await page.clock.fastForward(61000);await expect(page.getByRole('status')).toContainText('登录已失效');expect(state.writes()).toBe(0);
+  await expect(page.getByRole('button',{name:'重新登录',exact:true})).toBeVisible();await page.reload();await page.addScriptTag({content:script});
+  await expect(page.locator('#start')).toBeHidden();await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3540000);
+  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);
 });

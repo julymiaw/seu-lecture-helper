@@ -1,11 +1,11 @@
 import {ApiError, type Activity, type ReservationApi} from './api';
 import type {OcrEngine} from './ocr';
 import {Diagnostics, businessReason, errorInfo} from './diagnostics';
-export type Phase = 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'input' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
+export type Phase = 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'input' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
 export interface State {
   phase: Phase; message: string; activity?: Activity; offset?: number; remaining?: number;
   image?: string; code?: string; leadSeconds?: number; armed?: boolean;
-  ocrStatus?: 'loading' | 'ready' | 'failed'; ocrMessage?: string;
+  ocrStatus?: 'loading' | 'ready' | 'failed'; ocrMessage?: string; verifyAfterLogin?:boolean;
 }
 export function fullCapacity(state: State) {const a=state.activity; return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);}
 export function controls(state: State, now=Date.now()) {
@@ -25,6 +25,10 @@ export class Reservation {
   private round=0;
   private submissions=0;
   private incomplete=false;
+  private targetId?:string;
+  private nextSessionCheck=0;
+  private sessionChecking=false;
+  private expectedTickAt?:number;
   private diagnostics=new Diagnostics();
   constructor(private api:ReservationApi, private publish:(state:State)=>void, private now=Date.now, private ocr?:OcrEngine) {}
   private serverNow() {return this.now()+(this.state.offset??0);}
@@ -36,7 +40,7 @@ export class Reservation {
   private set(phase:Phase,message:string,extra:Partial<State>={}) {
     const from=this.state.phase;
     this.state={...this.state,...extra,phase,message}; this.publish(this.state);
-    if(from!==phase)this.diagnostics.record(['failed','unknown'].includes(phase)?'warn':'log','状态变化',{from,phase,round:this.round,submissions:this.submissions,reason:businessReason(message)});
+    if(from!==phase)this.diagnostics.record(['failed','unknown','login-required'].includes(phase)?'warn':'log','状态变化',{from,phase,round:this.round,submissions:this.submissions,reason:businessReason(message)});
   }
   private bookable() {
     const a=this.state.activity;
@@ -58,10 +62,11 @@ export class Reservation {
       if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'ready',ocrMessage:undefined});
     }catch(error){if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'failed',ocrMessage:'识别引擎不可用，请填写验证码'});}
   }
-  async open(id:string) {
+  async open(id:string,recovery?:{leadSeconds:number;verify:boolean}) {
+    this.targetId=id;
     const g=++this.generation;
-    this.diagnostics=new Diagnostics();this.round=0;this.submissions=0;this.incomplete=false;
-    this.state={phase:'loading',message:'正在获取活动信息',leadSeconds:30};this.publish(this.state);
+    this.diagnostics=new Diagnostics();this.round=0;this.submissions=0;this.incomplete=false;this.sessionChecking=false;this.expectedTickAt=undefined;
+    this.state={phase:'loading',message:'正在获取活动信息',leadSeconds:recovery?.leadSeconds??30,verifyAfterLogin:recovery?.verify};this.publish(this.state);
     this.diagnostics.record('log','打开任务',{activityId:id});
     try {
       const data=await this.stage('活动查询',()=>this.api.list());
@@ -72,25 +77,56 @@ export class Reservation {
       this.state={...this.state,activity,offset};
       if(!this.bookable())return;
       this.set('ready','');void this.prepareOcr();
-    }catch(error){if(this.valid(g))this.stop(message(error));}
+    }catch(error){if(this.valid(g)){if(error instanceof ApiError && error.kind==='session')this.requireLogin();else this.stop(message(error));}}
   }
   configure(leadSeconds:number) {
     if(this.state.phase==='ready' && [10,20,30,60].includes(leadSeconds))this.set('ready','',{leadSeconds});
   }
   start() {
     if(!controls(this.state,this.now()).start || !this.bookable())return;
+    this.nextSessionCheck=this.now()+60000;
     this.set('waiting','',{armed:true});
     this.diagnostics.record('log','启动任务',{leadSeconds:this.state.leadSeconds,serverOffsetMs:this.state.offset});
     this.tick();
   }
+  private requireLogin() {
+    ++this.generation;++this.ocrEpoch;clearTimeout(this.timer);clearTimeout(this.retryTimer);this.wake?.();this.wake=undefined;
+    this.set('login-required','登录已失效；登录后恢复任务',{image:undefined,code:'',remaining:undefined,verifyAfterLogin:['submitting','verifying','unknown'].includes(this.state.phase) || this.state.verifyAfterLogin});
+  }
+  async resume() {
+    if(this.state.phase!=='login-required' || !this.targetId)return;
+    const activity=this.state.activity,id=this.targetId,lead=this.state.leadSeconds??30,verify=this.state.verifyAfterLogin;
+    await this.open(id,{leadSeconds:lead,verify:Boolean(verify)});
+    if((this.state as State).phase==='login-required')this.set('login-required',this.state.message,{activity,leadSeconds:lead,armed:true,verifyAfterLogin:verify});
+    else if(verify)await this.restoreVerification();
+    else if((this.state as State).phase==='ready'){this.configure(lead);this.start();}
+  }
+  async restoreVerification() {
+    if(!this.state.activity || this.state.phase==='closed')return;
+    this.set('unknown','恢复后先核验之前的提交结果',{armed:false});await this.verify();
+  }
+  private async checkSession() {
+    const g=this.generation;
+    try {
+      await this.stage('等待期间登录检查',()=>this.api.captcha());
+    }catch(error){
+      if(!this.valid(g))return;
+      if(error instanceof ApiError && error.kind==='session')this.requireLogin();
+      else if(error instanceof ApiError && error.kind==='rate')this.stop(message(error));
+      else this.diagnostics.record('warn','登录检查未确认，保留原定时',{...errorInfo(error)});
+    }finally{if(this.valid(g)){this.sessionChecking=false;if(this.state.armed && this.round===0)this.tick();}}
+  }
   private tick=()=>{
     clearTimeout(this.timer);
+    if(this.expectedTickAt!==undefined && this.now()-this.expectedTickAt>1000)this.diagnostics.record('warn','计时回调延迟',{delayMs:this.now()-this.expectedTickAt,visibility:document.visibilityState});
     if(!this.state.armed || !this.bookable())return;
     const remaining=this.state.activity!.startsAt-this.serverNow();
     this.set(this.state.phase,this.state.message,{remaining:Math.max(0,remaining)});
-    if(this.round===0 && remaining<=(this.state.leadSeconds??30)*1000)void this.loadCaptcha();
+    if(this.round===0 && !this.sessionChecking && this.now()>=this.nextSessionCheck && remaining>((this.state.leadSeconds??30)+20)*1000){this.nextSessionCheck=this.now()+60000;this.sessionChecking=true;void this.checkSession();}
+    if(this.round===0 && !this.sessionChecking && remaining<=(this.state.leadSeconds??30)*1000)void this.loadCaptcha();
     if(remaining<=0){if(controls(this.state,this.now()).submit)void this.submit();else if(this.incomplete)void this.retryCaptcha();return;}
-    this.timer=setTimeout(this.tick,Math.min(250,remaining));
+    const delay=Math.min(250,remaining);this.expectedTickAt=this.now()+delay;
+    this.timer=setTimeout(this.tick,delay);
   };
   editCode(code:string) {
     if(!controls(this.state,this.now()).edit)return;
@@ -103,7 +139,7 @@ export class Reservation {
     const g=this.generation,epoch=++this.ocrEpoch;
     this.incomplete=false;
     ++this.round;
-    this.diagnostics.record('log','开始取图轮次',{round:this.round,afterOpenMs:this.serverNow()-this.state.activity!.startsAt,ocrReady:this.state.ocrStatus==='ready',visibility:document.visibilityState});
+    this.diagnostics.record('log','开始取图轮次',{round:this.round,plannedCaptureAt:new Date(this.state.activity!.startsAt-(this.state.offset??0)-(this.state.leadSeconds??30)*1000).toISOString(),captureDelayMs:this.serverNow()-this.state.activity!.startsAt+(this.state.leadSeconds??30)*1000,serverOffsetMs:this.state.offset,afterOpenMs:this.serverNow()-this.state.activity!.startsAt,ocrReady:this.state.ocrStatus==='ready',visibility:document.visibilityState});
     this.set('captcha-loading','正在获取验证码',{image:undefined,code:''});
     for(let attempt=0;attempt<3;attempt++) {
       try {
@@ -114,6 +150,7 @@ export class Reservation {
         return;
       }catch(error){
         if(!this.valid(g))return;
+        if(error instanceof ApiError && error.kind==='session'){this.requireLogin();return;}
         if(!(error instanceof ApiError)||error.kind!=='network'||attempt===2){this.stop(message(error));return;}
         await this.wait((attempt+1)*1000);
         if(!this.valid(g))return;
@@ -157,7 +194,8 @@ export class Reservation {
     try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));this.diagnostics.record('log','服务端报告预约成功',{responseCode:0,responseData:1});}
     catch(error){
       if(!this.valid(g))return;
-      if(error instanceof ApiError && ['session','rate'].includes(error.kind)){this.stop(message(error));return;}
+      if(error instanceof ApiError && error.kind==='session'){this.requireLogin();return;}
+      if(error instanceof ApiError && error.kind==='rate'){this.stop(message(error));return;}
       if(error instanceof ApiError && error.kind==='business'){
         const reason=businessReason(error.message);
         if(reason==='already-booked'){await this.verify();return;}
@@ -187,7 +225,8 @@ export class Reservation {
         detail = '暂未查到预约记录';
       } catch (error) {
         detail = message(error);
-        if (error instanceof ApiError && ['session', 'rate'].includes(error.kind)) break;
+        if(error instanceof ApiError && error.kind==='session'){if(this.valid(g))this.requireLogin();return;}
+        if(error instanceof ApiError && error.kind==='rate')break;
       }
     }
     if (this.valid(g)) this.finish('unknown', '结果待确认：' + detail + '。请重新核验，不要直接重复提交。');

@@ -59,7 +59,7 @@ it('repeated OCR failures recover without a fixed delay or retry limit',async()=
   const{task,api}=await setup({ocr:engine});task.start();await flush();expect(api.captcha).toHaveBeenCalledTimes(4);expect(task.state.phase).toBe('success');
 });
 it.each(['session','rate'] as const)('stops on %s without resubmitting or hiding the error in verification',async kind=>{
-  const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('stop',kind);})}});task.start();await flush();expect(task.state.phase).toBe('failed');expect(api.submit).toHaveBeenCalledTimes(1);expect(api.booked).not.toHaveBeenCalled();
+  const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('stop',kind);})}});task.start();await flush();expect(task.state.phase).toBe(kind==='session'?'login-required':'failed');expect(api.submit).toHaveBeenCalledTimes(1);expect(api.booked).not.toHaveBeenCalled();
 });
 it('full response is terminal and never starts monitoring',async()=>{
   const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('人数已满','business');})}});task.start();await flush();await vi.advanceTimersByTimeAsync(120000);expect(task.state.phase).toBe('failed');expect(api.captcha).toHaveBeenCalledTimes(1);
@@ -130,4 +130,38 @@ it('unavailable activities do not prepare OCR resources',async()=>{
     await setup({ocr:engine,overrides:{list:vi.fn(async()=>({activities:[activity],offset:0}))}});
     expect(engine.prepare).not.toHaveBeenCalled();
   }
+});
+it('checks the session once per minute but stops before final captcha preparation',async()=>{
+  const{task,api}=await setup({future:180000,ocr:ocr()});task.start();
+  await vi.advanceTimersByTimeAsync(60000);expect(api.captcha).toHaveBeenCalledTimes(1);expect(task.state.image).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(60000);expect(api.captcha).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(30000);expect(api.captcha).toHaveBeenCalledTimes(3);expect(task.state.code).toBe('0733');
+  await vi.advanceTimersByTimeAsync(30000);expect(api.captcha).toHaveBeenCalledTimes(3);expect(api.submit).toHaveBeenCalledTimes(1);
+});
+it('401 retains task identity and can resume after normal login',async()=>{
+  const engine=ocr();const{task,api,activity}=await setup({future:180000,ocr:engine});
+  vi.mocked(api.captcha).mockRejectedValueOnce(new ApiError('登录失效','session',401));task.start();await vi.advanceTimersByTimeAsync(60000);
+  expect(task.state.phase).toBe('login-required');expect(task.state.activity?.id).toBe(activity.id);expect(task.state.code).toBe('');expect(api.submit).not.toHaveBeenCalled();
+  await task.resume();expect(task.state.phase).toBe('waiting');await vi.advanceTimersByTimeAsync(120000);expect(task.state.phase).toBe('success');
+});
+it('an in-flight session probe cannot race the final captcha',async()=>{
+  const pending=deferred<string>();const{task,api}=await setup({future:120001,ocr:ocr()});vi.mocked(api.captcha).mockImplementationOnce(()=>pending.promise);task.start();await vi.advanceTimersByTimeAsync(60000);expect(api.captcha).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(30002);expect(api.captcha).toHaveBeenCalledTimes(1);
+  pending.resolve('probe-image');await flush();expect(api.captcha).toHaveBeenCalledTimes(2);expect(task.state.code).toBe('0733');task.close();
+});
+
+it('a session failure during submit resumes by verifying, never repeating the write',async()=>{
+  const{task,api}=await setup({ocr:ocr(),overrides:{submit:vi.fn(async()=>{throw new ApiError('登录失效','session',401);})}});
+  task.start();await flush();expect(task.state.phase).toBe('login-required');expect(task.state.verifyAfterLogin).toBe(true);
+  await task.resume();expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);expect(api.booked).toHaveBeenCalledTimes(1);
+});
+it('a session failure during verification preserves verification on login recovery',async()=>{
+  const{task,api}=await setup({ocr:ocr()});vi.mocked(api.booked).mockRejectedValueOnce(new ApiError('登录失效','session',401));
+  task.start();await flush();expect(task.state.phase).toBe('login-required');expect(task.state.verifyAfterLogin).toBe(true);
+  await task.resume();expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);expect(api.booked).toHaveBeenCalledTimes(2);
+});
+it('rate limiting during a session check stops further requests',async()=>{
+  const{task,api}=await setup({future:180000,overrides:{captcha:vi.fn(async()=>{throw new ApiError('频率限制','rate',429);})}});
+  task.start();await vi.advanceTimersByTimeAsync(60000);expect(task.state.phase).toBe('failed');await vi.advanceTimersByTimeAsync(120000);
+  expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).not.toHaveBeenCalled();
 });
