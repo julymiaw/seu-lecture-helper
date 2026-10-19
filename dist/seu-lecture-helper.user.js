@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.0
+// @version      0.7.1
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -53,6 +53,12 @@ SOFTWARE.
 
   // src/api.ts
   var BASE = "/gsapp/sys/yddjzxxtjappseu/modules/hdyy/";
+  function diagnosticText(value, captcha) {
+    let text = String(value ?? "");
+    if (captcha) text = text.split(captcha).join("[captcha]");
+    if (/(?:cookie|authorization|(?:access|refresh)[_-]?token|token|password)["']?\s*[:=]|\bBearer\s+/i.test(text)) return "[credential]";
+    return text.replace(/data:image\/[^\s]+/gi, "[image]").replace(/\b\d{4}\b/g, "[digits]");
+  }
   var ApiError = class extends Error {
     constructor(message2, kind, httpStatus) {
       super(message2);
@@ -124,8 +130,8 @@ SOFTWARE.
         if (!body || body.code === void 0) throw new ApiError("\u63A5\u53E3\u54CD\u5E94\u683C\u5F0F\u5DF2\u53D8\u5316", "format");
         if (String(body.code) !== "0") {
           const error = new ApiError(String(body.msg || "\u9884\u7EA6\u64CD\u4F5C\u672A\u6210\u529F"), "business", httpStatus);
-          const msg = String(body.msg || "").replace(/data:image\/[^\s]+/gi, "[image]").replace(/(?:cookie|authorization|token|password)\s*[:=]\s*[^\s,;]+/gi, "[credential]").replace(/\b\d{4}\b/g, "[digits]").slice(0, 500);
-          error.feedback = { code: typeof body.code === "number" ? body.code : String(body.code).slice(0, 32), datas: body.datas === null || typeof body.datas === "number" || typeof body.datas === "boolean" ? body.datas : null, msg };
+          const msg = diagnosticText(body.msg, data?.vcode).slice(0, 500);
+          error.feedback = { code: typeof body.code === "number" ? body.code : diagnosticText(body.code, data?.vcode).slice(0, 32), datas: body.datas === null || typeof body.datas === "number" || typeof body.datas === "boolean" ? body.datas : null, msg };
           throw error;
         }
         return body.datas;
@@ -172,7 +178,152 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.0";
+  var version = "0.7.1";
+
+  // src/log-store.ts
+  var LOG_CACHE = "seu-lecture-diagnostics-v1";
+  var MAX_EVENTS = 2e3;
+  var KEEP_HEAD = 50;
+  var MAX_RUNS = 10;
+  var MAX_AGE = 14 * 864e5;
+  function summarize(run) {
+    const start = run.events.find((e) => e.event === "\u542F\u52A8\u4EFB\u52A1");
+    const states = [...run.events].reverse().filter((e) => e.event === "\u72B6\u6001\u53D8\u5316");
+    const last = states[0], previous = states.find((e) => e.phase !== "closed");
+    const phase = last?.phase === "closed" && ["success", "failed", "unknown", "login-required"].includes(String(previous?.phase)) ? previous?.phase : last?.phase;
+    return { ...run, summary: { activityTitle: start?.activityTitle, activityId: start?.activityId, phase, lastPhase: last?.phase, droppedEvents: run.droppedEvents } };
+  }
+  function merge(a, b) {
+    const segments = { ...a?.segments };
+    for (const [id, count] of Object.entries(b.segments)) segments[id] = Math.max(segments[id] ?? 0, count);
+    const rows2 = /* @__PURE__ */ new Map();
+    for (const row of [...a?.events ?? [], ...b.events]) rows2.set(row.task + ":" + row.seq, row);
+    let events = [...rows2.values()].sort((x, y) => x.at.localeCompare(y.at) || x.task.localeCompare(y.task) || x.seq - y.seq);
+    if (events.length > MAX_EVENTS) events = [...events.slice(0, KEEP_HEAD), ...events.slice(-(MAX_EVENTS - KEEP_HEAD))];
+    return { run: b.run, startedAt: Math.min(a?.startedAt ?? b.startedAt, b.startedAt), updatedAt: Math.max(a?.updatedAt ?? 0, b.updatedAt), segments, events, droppedEvents: Object.values(segments).reduce((n, x) => n + x, 0) - events.length };
+  }
+  var LogStore = class {
+    constructor(openCache = () => caches.open(LOG_CACHE), now = Date.now) {
+      this.openCache = openCache;
+      this.now = now;
+    }
+    memory = /* @__PURE__ */ new Map();
+    dirty = /* @__PURE__ */ new Set();
+    timer;
+    queue = Promise.resolve();
+    storageFailed = false;
+    cleaned = /* @__PURE__ */ new Set();
+    key(run) {
+      return new URL("/.seu-lecture-helper/logs/" + encodeURIComponent(run) + ".json", location.origin).href;
+    }
+    append(entry) {
+      const at = Date.parse(entry.at), row = { ...entry };
+      const old = this.memory.get(entry.run);
+      let events = [...old?.events ?? [], row];
+      if (events.length > MAX_EVENTS) events = [...events.slice(0, KEEP_HEAD), ...events.slice(-(MAX_EVENTS - KEEP_HEAD))];
+      const segments = { ...old?.segments, [entry.task]: entry.seq };
+      const next = { run: entry.run, startedAt: old?.startedAt ?? at, updatedAt: at, segments, events, droppedEvents: Object.values(segments).reduce((n, x) => n + x, 0) - events.length };
+      this.memory.set(entry.run, next);
+      this.dirty.add(entry.run);
+      const recent = [...this.memory.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+      for (const run of recent.slice(MAX_RUNS)) {
+        this.memory.delete(run.run);
+        this.dirty.delete(run.run);
+      }
+      if (this.timer === void 0) this.timer = setTimeout(() => {
+        this.timer = void 0;
+        void this.flush();
+      }, 500);
+    }
+    async read(cache, key) {
+      const response = await cache.match(key);
+      if (!response) return;
+      const value = await response.json();
+      if (value && typeof value.run === "string" && Number.isFinite(value.updatedAt) && Number.isFinite(value.startedAt) && Array.isArray(value.events) && value.segments && typeof value.segments === "object" && !Array.isArray(value.segments) && Object.values(value.segments).every((n) => Number.isInteger(n) && Number(n) >= 0) && value.events.every((row) => row && row.run === value.run && typeof row.task === "string" && typeof row.at === "string" && Number.isFinite(Date.parse(row.at)) && Number.isInteger(row.seq) && row.seq > 0 && row.seq <= value.segments[row.task] && typeof row.event === "string")) return value;
+      throw new Error("invalid local log");
+    }
+    async prune(cache) {
+      const rows2 = [];
+      for (const key of await cache.keys()) try {
+        const value = await this.read(cache, key);
+        if (value) rows2.push({ key, value });
+      } catch {
+        await cache.delete(key);
+      }
+      rows2.sort((a, b) => b.value.updatedAt - a.value.updatedAt);
+      for (const [i, row] of rows2.entries()) if (i >= MAX_RUNS || row.value.updatedAt < this.now() - MAX_AGE) await cache.delete(row.key);
+    }
+    flush() {
+      clearTimeout(this.timer);
+      this.timer = void 0;
+      const batch = [...this.dirty].map((id) => this.memory.get(id)).filter(Boolean);
+      this.dirty.clear();
+      if (!batch.length) return this.queue;
+      const operation = async () => {
+        try {
+          const cache = await this.openCache();
+          for (const snapshot of batch) {
+            let previous;
+            try {
+              previous = await this.read(cache, this.key(snapshot.run));
+            } catch {
+              this.storageFailed = true;
+            }
+            const combined = merge(previous, snapshot);
+            await cache.put(this.key(snapshot.run), new Response(JSON.stringify(combined), { headers: { "Content-Type": "application/json" } }));
+            const current = this.memory.get(snapshot.run);
+            if (current) this.memory.set(snapshot.run, merge(combined, current));
+            if (!previous || !this.cleaned.has(snapshot.run)) {
+              await this.prune(cache);
+              this.cleaned.add(snapshot.run);
+            }
+          }
+        } catch {
+          this.storageFailed = true;
+          for (const snapshot of batch) if (this.memory.has(snapshot.run)) this.dirty.add(snapshot.run);
+        }
+      };
+      this.queue = this.queue.then(async () => {
+        if (navigator.locks) await navigator.locks.request("seu-lecture-helper:logs", async () => {
+          await operation();
+        });
+        else await operation();
+      }).catch(() => {
+        this.storageFailed = true;
+        for (const snapshot of batch) if (this.memory.has(snapshot.run)) this.dirty.add(snapshot.run);
+      });
+      return this.queue;
+    }
+    async export() {
+      for (const id of this.memory.keys()) this.dirty.add(id);
+      await this.flush();
+      const runs = /* @__PURE__ */ new Map();
+      try {
+        const cache = await this.openCache();
+        for (const key of await cache.keys()) try {
+          const value = await this.read(cache, key);
+          if (value) runs.set(value.run, value);
+        } catch {
+          this.storageFailed = true;
+        }
+      } catch {
+        this.storageFailed = true;
+      }
+      for (const [id, value] of this.memory) runs.set(id, merge(runs.get(id), value));
+      return { schema: 1, exportedAt: new Date(this.now()).toISOString(), storageWarning: this.storageFailed ? "\u672C\u5730\u65E5\u5FD7\u7F13\u5B58\u66FE\u8BFB\u5199\u5931\u8D25\uFF0C\u90E8\u5206\u5386\u53F2\u53EF\u80FD\u7F3A\u5931\uFF1B\u5305\u542B\u5F53\u524D\u5185\u5B58\u8BB0\u5F55\u3002" : void 0, runs: [...runs.values()].filter((x) => x.updatedAt >= this.now() - MAX_AGE).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_RUNS).map(summarize) };
+    }
+  };
+  var logStore = new LogStore();
+  async function downloadLogs() {
+    const report = await logStore.export();
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "seu-lecture-logs-" + (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-") + ".json";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1e3);
+    return report.storageWarning;
+  }
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -203,20 +354,24 @@ SOFTWARE.
     return "other";
   }
   var Diagnostics = class {
-    id = `${Date.now().toString(36)}-${++sequence}`;
+    id = `${Date.now().toString(36)}-${++sequence}-${crypto.randomUUID()}`;
+    run;
+    seq = 0;
+    constructor(run) {
+      this.run = run ?? this.id;
+    }
     started = performance.now();
     record(level, event, fields = {}) {
+      const row = { ...fields, version: VERSION, run: this.run, task: this.id, seq: ++this.seq, at: (/* @__PURE__ */ new Date()).toISOString(), elapsedMs: Math.round(performance.now() - this.started), level, event };
       try {
-        console[level]("[SEU\u9884\u7EA6\u52A9\u624B]", {
-          version: VERSION,
-          task: this.id,
-          at: (/* @__PURE__ */ new Date()).toISOString(),
-          elapsedMs: Math.round(performance.now() - this.started),
-          event,
-          ...fields
-        });
+        logStore.append(row);
       } catch {
       }
+      try {
+        console[level]("[SEU\u9884\u7EA6\u52A9\u624B]", row);
+      } catch {
+      }
+      if (event === "\u72B6\u6001\u53D8\u5316" && ["success", "failed", "unknown", "login-required", "closed"].includes(String(fields.phase))) void logStore.flush();
     }
     async measure(stage, operation, fields = {}, stale = () => false) {
       this.record("log", stage + "\u5F00\u59CB", fields);
@@ -261,6 +416,7 @@ SOFTWARE.
   }
 
   // src/reservation.ts
+  var CAPTURE_LEAD_MS = 3e4;
   function fullCapacity(state) {
     const a = state.activity;
     return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);
@@ -295,6 +451,10 @@ SOFTWARE.
     sessionChecking = false;
     expectedTickAt;
     diagnostics = new Diagnostics();
+    captchaSentAt;
+    captchaReceivedAt;
+    ocrFinishedAt;
+    lastSessionCheckAt;
     serverNow() {
       return this.now() + (this.state.offset ?? 0);
     }
@@ -354,15 +514,19 @@ SOFTWARE.
       this.targetId = id;
       this.recovery = recovery;
       const g = ++this.generation;
-      this.diagnostics = new Diagnostics();
+      this.diagnostics = new Diagnostics(recovery?.runId);
+      this.captchaSentAt = void 0;
+      this.captchaReceivedAt = void 0;
+      this.ocrFinishedAt = void 0;
+      this.lastSessionCheckAt = void 0;
       this.round = 0;
       this.submissions = 0;
       this.preparing = void 0;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
-      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: recovery?.leadSeconds ?? 30, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online", labels: recovery?.labels };
+      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", runId: this.diagnostics.run, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online", labels: recovery?.labels };
       this.publish(this.state);
-      this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id });
+      this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id, recovered: Boolean(recovery), verifyOnly: Boolean(recovery?.verify) });
       if (recovery?.verify) {
         this.set("unknown", "\u6062\u590D\u540E\u5148\u6838\u9A8C\u4E4B\u524D\u7684\u63D0\u4EA4\u7ED3\u679C");
         return;
@@ -449,14 +613,11 @@ SOFTWARE.
       this.tick();
       return true;
     }
-    configure(leadSeconds) {
-      if (this.state.phase === "ready" && [10, 20, 30, 60].includes(leadSeconds)) this.set("ready", "", { leadSeconds });
-    }
     start() {
       if (!controls(this.state, this.now()).start || !this.bookable()) return;
       this.nextSessionCheck = this.now() + 6e4;
       this.set("waiting", "", { armed: true });
-      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: this.state.leadSeconds, serverOffsetMs: this.state.offset });
+      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: CAPTURE_LEAD_MS / 1e3, serverOffsetMs: this.state.offset, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
       this.tick();
     }
     requireLogin() {
@@ -474,14 +635,11 @@ SOFTWARE.
         await this.restoreVerification();
         return;
       }
-      const snapshot = this.state, id = this.targetId, lead = this.state.leadSeconds ?? 30;
-      const recovery = { leadSeconds: lead, verify: false, ids: this.state.candidates?.map((a) => a.id) ?? this.recovery?.ids, index: this.state.candidateIndex ?? this.recovery?.index, preferred: this.state.preferred, labels: this.state.labels };
+      const snapshot = this.state, id = this.targetId;
+      const recovery = { runId: this.state.runId, verify: false, ids: this.state.candidates?.map((a) => a.id) ?? this.recovery?.ids, index: this.state.candidateIndex ?? this.recovery?.index, preferred: this.state.preferred, labels: this.state.labels };
       await this.open(id, recovery);
-      if (this.state.phase === "login-required") this.set("login-required", this.state.message, { ...snapshot, leadSeconds: lead, armed: Boolean(snapshot.armed) });
-      else if (this.state.phase === "ready") {
-        this.configure(lead);
-        this.start();
-      }
+      if (this.state.phase === "login-required") this.set("login-required", this.state.message, { ...snapshot, runId: this.diagnostics.run, armed: Boolean(snapshot.armed) });
+      else if (this.state.phase === "ready") this.start();
     }
     async restoreVerification() {
       if (!this.targetId || this.state.phase === "closed") return;
@@ -492,6 +650,7 @@ SOFTWARE.
       const g = this.generation;
       try {
         await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.captcha());
+        if (this.valid(g)) this.lastSessionCheckAt = this.now();
       } catch (error) {
         if (!this.valid(g)) return;
         if (error instanceof ApiError && error.kind === "session") this.requireLogin();
@@ -510,12 +669,12 @@ SOFTWARE.
       if (!this.state.armed || !this.bookable()) return;
       const remaining = this.state.activity.startsAt - this.serverNow();
       this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
-      if (this.round === 0 && !this.sessionChecking && this.now() >= this.nextSessionCheck && remaining > ((this.state.leadSeconds ?? 30) + 20) * 1e3) {
+      if (this.round === 0 && !this.sessionChecking && this.now() >= this.nextSessionCheck && remaining > CAPTURE_LEAD_MS + 2e4) {
         this.nextSessionCheck = this.now() + 6e4;
         this.sessionChecking = true;
         void this.checkSession();
       }
-      if (this.round === 0 && !this.sessionChecking && remaining <= (this.state.leadSeconds ?? 30) * 1e3) void this.loadCaptcha();
+      if (this.round === 0 && !this.sessionChecking && remaining <= CAPTURE_LEAD_MS) void this.loadCaptcha();
       if (remaining <= 0) {
         if (controls(this.state, this.now()).submit) void this.submit();
         return;
@@ -528,12 +687,17 @@ SOFTWARE.
       if (!this.state.armed || this.state.phase !== "waiting" || !this.bookable()) return;
       const g = this.generation, epoch = ++this.ocrEpoch;
       ++this.round;
-      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedCaptureAt: new Date(this.state.activity.startsAt - (this.state.offset ?? 0) - (this.state.leadSeconds ?? 30) * 1e3).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + (this.state.leadSeconds ?? 30) * 1e3, serverOffsetMs: this.state.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedCaptureAt: new Date(this.state.activity.startsAt - (this.state.offset ?? 0) - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + CAPTURE_LEAD_MS, serverOffsetMs: this.state.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
+          this.captchaSentAt = this.now();
+          this.captchaReceivedAt = void 0;
+          this.ocrFinishedAt = void 0;
           const image = await this.stage("\u9A8C\u8BC1\u7801\u83B7\u53D6", () => this.api.captcha());
           if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
+          this.captchaReceivedAt = this.now();
+          this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u5230\u8FBE", { round: this.round, requestAttempt: attempt + 1, captchaSentAt: this.captchaSentAt, captchaReceivedAt: this.captchaReceivedAt });
           this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801", { image });
           void this.recognize(image, epoch);
           return;
@@ -568,7 +732,8 @@ SOFTWARE.
       try {
         const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch)).trim();
         if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
-        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { length: code.length, valid: /^\d{4}$/.test(code) });
+        this.ocrFinishedAt = this.now();
+        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, length: code.length, valid: /^\d{4}$/.test(code), ocrFinishedAt: this.ocrFinishedAt });
         if (!/^\d{4}$/.test(code)) {
           await this.retryCaptcha();
           return;
@@ -591,7 +756,7 @@ SOFTWARE.
       clearTimeout(this.timer);
       const g = this.generation;
       ++this.submissions;
-      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { activityId: this.state.activity.id, priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, afterOpenMs: this.serverNow() - this.state.activity.startsAt });
+      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { activityId: this.state.activity.id, priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, afterOpenMs: this.serverNow() - this.state.activity.startsAt, captchaSentAt: this.captchaSentAt, captchaReceivedAt: this.captchaReceivedAt, captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.now() - this.captchaReceivedAt, captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.now() - this.captchaSentAt, ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.now() - this.ocrFinishedAt, lastSessionCheckAt: this.lastSessionCheckAt, sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.now() - this.lastSessionCheckAt, visibility: document.visibilityState });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
       try {
         await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
@@ -699,18 +864,19 @@ SOFTWARE.
     host = document.createElement("div");
     root = this.host.attachShadow({ mode: "open" });
     panel;
-    lastImage;
     candidateSignature = "";
     labelsSignature = "";
+    exporting = false;
+    phase;
     constructor(actions) {
       this.host.id = "seu-lecture-helper-dialog";
       this.root.innerHTML = `<style>
 :host{all:initial;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#18251e}
 *{box-sizing:border-box}dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}dialog::backdrop{background:#10251c80}
-#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#labels{grid-column:1/-1;display:grid;gap:8px}#label-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;margin:6px 0}#annotate{justify-self:end}#pair-question{font-size:14px;color:#64776a;margin:0}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active,li.success{color:#24663b;font-weight:600}li.full{color:#a25f50}li.full .candidate-name{text-decoration:line-through;opacity:.8}li.failed{color:#a25f50}.candidate-status{margin-left:8px;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
-.challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}output{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}
-p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}output{font-size:24px;letter-spacing:4px}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u5C06\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\u4E5F\u52A0\u5165\u5019\u9009\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><div class="body"><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><output aria-label="OCR\u8BC6\u522B\u7ED3\u679C">\u2014</output></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u53D6\u6D88</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></div></dialog>`;
+#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#labels{grid-column:1/-1;display:grid;gap:8px}#label-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;margin:6px 0}#annotate{justify-self:end}#pair-question{font-size:14px;color:#64776a;margin:0}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active,li.success{color:#24663b;font-weight:600}li.full{color:#a25f50}li.full .candidate-name{text-decoration:line-through;opacity:.8}li.failed{color:#a25f50}.candidate-status{margin-left:8px;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:center;align-items:center;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
+
+p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}}
+</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u5C06\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\u4E5F\u52A0\u5165\u5019\u9009\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span></div><div class="body"><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u53D6\u6D88</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="export">\u5BFC\u51FA\u65E5\u5FD7</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></div></dialog>`;
       this.panel = this.get("dialog");
       this.get("#online-first").addEventListener("click", () => actions.prefer("online"));
       this.get("#offline-first").addEventListener("click", () => actions.prefer("offline"));
@@ -721,7 +887,18 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         for (const select of this.root.querySelectorAll("#label-fields select")) if (select.value === "online" || select.value === "offline") labels[select.dataset.id] = select.value;
         actions.annotate(labels);
       });
-      this.get("#lead").addEventListener("change", () => actions.configure(Number(this.get("#lead").value)));
+      this.get("#export").addEventListener("click", async () => {
+        const button = this.get("#export");
+        if (this.exporting) return;
+        this.exporting = true;
+        button.disabled = true;
+        try {
+          await actions.exportLogs();
+        } finally {
+          this.exporting = false;
+          button.disabled = this.phase === "submitting" || this.phase === "verifying";
+        }
+      });
       for (const id of ["start", "verify", "reload", "hide", "close", "login", "resume"]) this.get("#" + id).addEventListener("click", () => actions[id]());
       this.panel.addEventListener("cancel", (e) => {
         e.preventDefault();
@@ -744,6 +921,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.host.remove();
     }
     render(state) {
+      this.phase = state.phase;
       const allowed = controls(state);
       const choosing = state.phase === "choosing", other = state.candidates?.find((a) => a.id !== state.requestedId);
       this.get("#title").textContent = (choosing ? other?.title : state.activity?.title) ?? "\u8BB2\u5EA7\u9884\u7EA6";
@@ -800,21 +978,10 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get("#status").hidden = !state.message;
       this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "prepared"].includes(state.phase);
       this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? Date.now()) - Date.now() - (state.offset ?? 0)));
-      const lead = this.get("#lead");
-      lead.value = String(state.leadSeconds ?? 30);
-      lead.disabled = state.phase !== "ready";
-      this.get(".challenge").hidden = !state.image || ["success", "failed", "unknown"].includes(state.phase);
-      const image = this.get("img");
-      const changed = state.image !== this.lastImage;
-      if (changed) {
-        this.lastImage = state.image;
-        if (state.image) {
-          image.src = state.image;
-          this.show();
-        } else image.removeAttribute("src");
-      }
-      this.get("output").textContent = state.code ?? "\u2014";
+      this.get("#export").hidden = choosing;
+      this.get("#export").disabled = this.exporting || ["submitting", "verifying"].includes(state.phase);
       this.host.dataset.ocr = state.ocrStatus;
+      this.host.dataset.phase = state.phase;
       this.get("#start").hidden = state.phase !== "ready";
       this.get("#start").disabled = !allowed.start;
       this.get("#start").textContent = (state.activity?.startsAt ?? 0) > Date.now() + (state.offset ?? 0) ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
@@ -3809,7 +3976,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         return;
       }
       if (state.armed || ["submitting", "verifying", "unknown"].includes(state.phase)) {
-        const task = { id: state.activity.id, leadSeconds: state.leadSeconds ?? 30, endsAt: state.activity.endsAt, verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase)) };
+        const task = { id: state.activity.id, leadSeconds: CAPTURE_LEAD_MS / 1e3, runId: state.runId, endsAt: state.activity.endsAt, verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase)) };
         if ((state.candidates?.length ?? 0) > 1) Object.assign(task, { version: 2, ids: state.candidates.map((a) => a.id), index: state.candidateIndex ?? 0, preferred: state.preferred ?? "online", labels: state.labels });
         storage.setItem(KEY, JSON.stringify(task));
       }
@@ -3819,7 +3986,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
   function readTask(storage = sessionStorage) {
     try {
       const task = JSON.parse(storage.getItem(KEY) ?? "null");
-      if (task && typeof task.id === "string" && [10, 20, 30, 60].includes(task.leadSeconds) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && (task.verify || task.endsAt > Date.now())) {
+      if (task && typeof task.id === "string" && (task.leadSeconds === void 0 || [10, 20, 30, 60].includes(task.leadSeconds)) && (task.runId === void 0 || typeof task.runId === "string" && task.runId.length > 0 && task.runId.length <= 150) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && (task.verify || task.endsAt > Date.now())) {
         if (task.version === void 0 && task.ids === void 0) return task;
         if (task.version === 2 && Array.isArray(task.ids) && task.ids.length === 2 && task.ids.every((id) => typeof id === "string" && id.length > 0) && new Set(task.ids).size === 2 && Number.isInteger(task.index) && task.index >= 0 && task.index < 2 && task.ids[task.index] === task.id && ["online", "offline"].includes(task.preferred) && (task.labels === void 0 || task.labels && typeof task.labels === "object" && !Array.isArray(task.labels) && Object.entries(task.labels).every(([id, m]) => task.ids.includes(id) && ["online", "offline"].includes(String(m))))) return task;
       }
@@ -3899,8 +4066,15 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           },
           close: () => close(),
           reload: () => location.reload(),
+          exportLogs: async () => {
+            try {
+              const warning = await downloadLogs();
+              if (warning) notice(warning);
+            } catch (error) {
+              notice("\u65E5\u5FD7\u5BFC\u51FA\u5931\u8D25\uFF1A" + message(error));
+            }
+          },
           start: () => task.start(),
-          configure: (seconds) => task.configure(seconds),
           hide: () => dialog.hide()
         });
         current = { task, dialog, release };
@@ -3908,10 +4082,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         if (!recovery) task.requestPairChoice(id);
         if (recovery && task.state.phase !== "login-required") {
           if (recovery.verify) await task.restoreVerification();
-          else if (task.state.phase === "ready") {
-            task.configure(recovery.leadSeconds);
-            task.start();
-          }
+          else if (task.state.phase === "ready") task.start();
         }
       } catch (error) {
         release?.();
@@ -3929,6 +4100,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     window.addEventListener("pagehide", () => {
       mount.stop();
       close(false);
+      void logStore.flush();
     });
     window.addEventListener("pageshow", (event) => {
       if (event.persisted) mount.start();

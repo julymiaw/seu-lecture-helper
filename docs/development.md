@@ -19,7 +19,7 @@ npm run check
 - `src/candidates.ts`：标题元数据解析、唯一场次配对与顺序。
 - `src/dialog.ts`：独立弹窗、只读识别结果与操作事件。
 - `src/ocr.ts`、`ocr-assets.*`：本地推理、资源校验与缓存。
-- `src/diagnostics.ts`：Console 事件与阶段耗时。
+- `src/diagnostics.ts`、`log-store.ts`：结构化事件、阶段耗时、本地 JSON 缓存与导出。
 - `src/mount.ts`、`lock.ts`、`main.ts`：按钮挂载、跨标签页互斥与初始化。
 - `tests/`：接口样例、状态机、DOM 和真实 WASM／模型的离线浏览器测试。
 - `dist/seu-lecture-helper.user.js`：构建产物。

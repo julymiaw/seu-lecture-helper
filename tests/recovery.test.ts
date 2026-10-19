@@ -8,7 +8,7 @@ const flush=async()=>{for(let i=0;i<70;i++)await Promise.resolve();};
 it.each([0,1])('repeated authentication failures preserve candidate group, labels and priority at index %s',async index=>{
   vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();
   const online={...await sample(),id:'on',title:'同一讲座',reserved:false,startsAt:NOW+180000},offline={...online,id:'off',place:'报告厅'};
-  const intent={leadSeconds:20,verify:false,ids:['off','on'],index,preferred:'offline' as const,labels:{off:'offline' as const,on:'online' as const}};
+  const intent={leadSeconds:30,verify:false,ids:['off','on'],index,preferred:'offline' as const,labels:{off:'offline' as const,on:'online' as const}};
   const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],offset:0})),captcha:vi.fn(async()=>{throw new ApiError('未登录','session',401);})});
   const task=new Reservation(api,s=>saveTask(s),Date.now,engine());await task.open(intent.ids[index],intent);task.start();await vi.advanceTimersByTimeAsync(60000);
   expect(task.state.phase).toBe('login-required');const before=readTask();expect(before).toMatchObject(intent);
@@ -19,7 +19,7 @@ it.each([0,1])('repeated authentication failures preserve candidate group, label
 });
 it.each([false,true])('expired pending %s-group writes restore verification without metadata, OCR or resubmission',async group=>{
   vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();const online={...await sample(),id:'on',endsAt:NOW-1},offline={...online,id:'off'};
-  saveTask({phase:'unknown',message:'',activity:group?offline:online,candidates:group?[online,offline]:[online],candidateIndex:group?1:0,preferred:'online',leadSeconds:20});
+  saveTask({phase:'unknown',message:'',activity:group?offline:online,candidates:group?[online,offline]:[online],candidateIndex:group?1:0,preferred:'online'});
   const saved=readTask()!;expect(saved.verify).toBe(true);const api=await mockApi({list:vi.fn(async()=>{throw new Error('metadata must not be needed');})}),ocr=engine();
   const task=new Reservation(api,s=>saveTask(s),Date.now,ocr);await task.open(saved.id,saved);await task.restoreVerification();
   expect(task.state.phase).toBe('success');expect(api.booked).toHaveBeenCalledWith(saved.id);expect(api.submit).not.toHaveBeenCalled();expect(api.captcha).not.toHaveBeenCalled();expect(api.list).not.toHaveBeenCalled();expect(ocr.prepare).not.toHaveBeenCalled();expect(readTask()).toBeUndefined();
@@ -33,7 +33,7 @@ it('an expired write that remains unknown keeps its verification barrier through
 });
 
 it.each(['network','format'] as const)('a %s failure loading recovery metadata retains the original task for another reload',async kind=>{
-  vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();const activity={...await sample(),endsAt:NOW+180000};saveTask({phase:'waiting',message:'',activity,armed:true,leadSeconds:20});const saved=readTask()!;
+  vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();const activity={...await sample(),endsAt:NOW+180000};saveTask({phase:'waiting',message:'',activity,armed:true});const saved=readTask()!;
   const api=await mockApi({list:vi.fn(async()=>{throw new ApiError('temporary metadata failure',kind,502);})});
   const task=new Reservation(api,s=>saveTask(s),Date.now,engine());await task.open(saved.id,saved);
   expect(task.state.phase).toBe('failed');expect(readTask()).toEqual(saved);expect(api.captcha).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();

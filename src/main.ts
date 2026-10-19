@@ -1,5 +1,6 @@
 import {Api} from './api';
 import {VERSION} from './diagnostics';
+import {downloadLogs,logStore} from './log-store';
 import {Dialog} from './dialog';
 import {acquireTask} from './lock';
 import {Mount} from './mount';
@@ -39,17 +40,17 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
         current?.dialog.render(state);
       }, Date.now, ocr);
       const dialog = new Dialog({choosePair:include=>task.choosePair(include),prefer:preferred=>task.prefer(preferred),annotate:labels=>task.prefer(task.state.preferred??'online',labels),verify: () => {void task.verify();}, resume: () => {void task.resume();}, login: () => {location.reload();}, close: () => close(), reload: () => location.reload(),
-        start: () => task.start(), configure: seconds => task.configure(seconds), hide: () => dialog.hide()});
+        exportLogs: async()=>{try{const warning=await downloadLogs();if(warning)notice(warning);}catch(error){notice('日志导出失败：'+message(error));}},start: () => task.start(), hide: () => dialog.hide()});
       current = {task, dialog, release};
       await task.open(id,recovery);
       if(!recovery)task.requestPairChoice(id);
-      if(recovery && task.state.phase!=='login-required'){if(recovery.verify)await task.restoreVerification();else if(task.state.phase==='ready'){task.configure(recovery.leadSeconds);task.start();}}
+      if(recovery && task.state.phase!=='login-required'){if(recovery.verify)await task.restoreVerification();else if(task.state.phase==='ready')task.start();}
     } catch (error) {release?.(); notice(message(error));}
     finally {opening = false;}
   }
   const mount = new Mount(api, id => {void open(id);}, () => close());
   mount.start();
   const pending=readTask();if(pending)void open(pending.id,pending);
-  window.addEventListener('pagehide', () => {mount.stop(); close(false);});
+  window.addEventListener('pagehide', () => {mount.stop(); close(false);void logStore.flush();});
   window.addEventListener('pageshow', event => {if (event.persisted) mount.start();});
 }

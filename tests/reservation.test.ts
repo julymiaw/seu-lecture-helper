@@ -19,9 +19,9 @@ it('obtains and recognizes at T-30s, then submits only at the opening deadline',
   await vi.advanceTimersByTimeAsync(1);expect(api.submit).toHaveBeenCalledExactlyOnceWith(task.state.activity!.id,'0733');expect(task.state.phase).toBe('success');
 });
 
-it('uses the selected lead time, does not take images just by opening, and locks settings after starting',async()=>{
-  const{task,api}=await setup({future:60000,ocr:ocr()});task.configure(10);expect(api.captcha).not.toHaveBeenCalled();task.start();task.configure(60);
-  await vi.advanceTimersByTimeAsync(49999);expect(api.captcha).not.toHaveBeenCalled();await vi.advanceTimersByTimeAsync(1);expect(api.captcha).toHaveBeenCalledTimes(1);task.close();
+it('always uses 30 seconds, including recovery from an old 10-second setting',async()=>{
+  const{task,api,activity}=await setup({future:60000,ocr:ocr()});await task.open(activity.id,{leadSeconds:10,verify:false});expect(api.captcha).not.toHaveBeenCalled();task.start();
+  await vi.advanceTimersByTimeAsync(29999);expect(api.captcha).not.toHaveBeenCalled();await vi.advanceTimersByTimeAsync(1);expect(api.captcha).toHaveBeenCalledTimes(1);task.close();
 });
 it('uses the server offset for both early acquisition and final submission',async()=>{
   const activity={...await sample(),reserved:false,startsAt:NOW+40000};

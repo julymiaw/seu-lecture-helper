@@ -82,3 +82,19 @@ it('opening a full activity reports a business warning without a console error',
   expect(task.state.phase).toBe('failed');expect(console.error).not.toHaveBeenCalled();
   expect(vi.mocked(console.warn).mock.calls.some(call=>call[1]?.event==='状态变化' && call[1]?.reason==='full')).toBe(true);
 });
+it('records captcha holding time, OCR wait and last successful session check at submission',async()=>{
+  vi.useFakeTimers();const {Reservation}=await import('../src/reservation');const {mockApi,NOW,sample}=await import('./helpers');vi.setSystemTime(NOW);
+  const activity={...await sample(),reserved:false,startsAt:NOW+180000},api=await mockApi({list:vi.fn(async()=>({activities:[activity],offset:0}))});
+  const task=new Reservation(api,vi.fn(),Date.now,engine());await task.open(activity.id);task.start();await vi.advanceTimersByTimeAsync(180000);
+  const logs=vi.mocked(console.log).mock.calls.map(call=>call[1]),submit=logs.find(e=>e.event==='提交时机');
+  expect(submit).toMatchObject({captchaHeldMs:30000,captchaRequestAgeMs:30000,ocrWaitMs:30000,lastSessionCheckAt:NOW+120000,sessionCheckAgeMs:60000,afterOpenMs:0});
+  expect(logs.find(e=>e.event==='验证码到达')).toMatchObject({round:1,requestAttempt:1,captchaReceivedAt:NOW+150000});expect(task.state.phase).toBe('success');
+});
+it('keeps a stable run ID across recovery while each execution has its own task ID',async()=>{
+  const a=new Diagnostics(),b=new Diagnostics(a.run);a.record('log','first');b.record('log','recovered');const calls=vi.mocked(console.log).mock.calls;expect(calls[0][1].run).toBe(calls[1][1].run);expect(calls[0][1].task).not.toBe(calls[1][1].task);
+});
+it.each(['验证码错误 authorization: Bearer SECRET_AUTH','{"token":"SECRET_TOKEN","password":"SECRET_PASSWORD"}','Cookie: first=SECRET_ONE; second=SECRET_TWO','password:\nSECRET_MULTILINE'])('omits credential-bearing business feedback from diagnostics: %s',async msg=>{
+  const {Api}=await import('../src/api');const api=new Api(vi.fn(async()=>new Response(JSON.stringify({code:-1,datas:null,msg}))));
+  await expect(new Diagnostics().measure('预约提交',()=>api.submit('id','0733'))).rejects.toBeInstanceOf(ApiError);
+  const logs=JSON.stringify(vi.mocked(console.warn).mock.calls);expect(logs).not.toContain('SECRET');expect(logs).toContain('[credential]');
+});

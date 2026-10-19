@@ -1,5 +1,12 @@
 export const BASE = '/gsapp/sys/yddjzxxtjappseu/modules/hdyy/';
 export type Row = Record<string, unknown>;
+function diagnosticText(value:unknown,captcha?:string) {
+  let text=String(value??'');if(captcha)text=text.split(captcha).join('[captcha]');
+  // Omit the whole message when credentials are present; partial header/JSON
+  // replacement is unsafe for values containing spaces, semicolons or newlines.
+  if(/(?:cookie|authorization|(?:access|refresh)[_-]?token|token|password)["']?\s*[:=]|\bBearer\s+/i.test(text))return '[credential]';
+  return text.replace(/data:image\/[^\s]+/gi,'[image]').replace(/\b\d{4}\b/g,'[digits]');
+}
 export interface Activity {
   id: string; title: string; place: string;
   startsAt: number; endsAt: number; eventStart: string; eventEnd: string;
@@ -60,8 +67,8 @@ export class Api implements ReservationApi {
       if (String(body.code) !== '0') {
         const error = new ApiError(String(body.msg || '预约操作未成功'), 'business', httpStatus);
         // Retain only the business envelope; omit arbitrary response data and debugException.
-        const msg = String(body.msg || '').replace(/data:image\/[^\s]+/gi, '[image]').replace(/(?:cookie|authorization|token|password)\s*[:=]\s*[^\s,;]+/gi, '[credential]').replace(/\b\d{4}\b/g, '[digits]').slice(0, 500);
-        error.feedback = {code: typeof body.code === 'number' ? body.code : String(body.code).slice(0, 32), datas: body.datas === null || typeof body.datas === 'number' || typeof body.datas === 'boolean' ? body.datas : null, msg};
+        const msg=diagnosticText(body.msg,data?.vcode).slice(0,500);
+        error.feedback = {code: typeof body.code === 'number' ? body.code : diagnosticText(body.code,data?.vcode).slice(0,32), datas: body.datas === null || typeof body.datas === 'number' || typeof body.datas === 'boolean' ? body.datas : null, msg};
         throw error;
       }
       return body.datas;
