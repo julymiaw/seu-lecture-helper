@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.6.0
+// @version      0.6.1
 // @description  提前准备验证码、人工修正、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -172,7 +172,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.6.0";
+  var version = "0.6.1";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -400,6 +400,15 @@ SOFTWARE.
           else this.stop(message(error));
         }
       }
+    }
+    requestPairChoice(id) {
+      if (this.state.phase === "ready" && this.state.candidates?.length === 2) this.set("choosing", "", { requestedId: id });
+    }
+    choosePair(include) {
+      if (this.state.phase !== "choosing") return;
+      const id = this.state.requestedId;
+      this.set("ready", "", { requestedId: void 0 });
+      if (!include) this.single(id);
     }
     single(id) {
       if (this.state.phase !== "ready") return;
@@ -686,19 +695,26 @@ SOFTWARE.
     panel;
     lastImage;
     candidateSignature = "";
+    labelsSignature = "";
     constructor(actions) {
       this.host.id = "seu-lecture-helper-dialog";
       this.root.innerHTML = `<style>
 :host{all:initial;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#18251e}
 *{box-sizing:border-box}dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}dialog::backdrop{background:#10251c80}
-#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#annotate{grid-column:1/-1}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active{color:#24663b;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
+#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#labels{grid-column:1/-1;display:grid;gap:8px}#label-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;margin:6px 0}#annotate{justify-self:end}#join{margin-left:auto}#pair-question{font-size:14px;color:#64776a;margin:0}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active{color:#24663b;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
 .challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}input{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}input:focus{outline:2px solid #287547;outline-offset:2px}
 p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}#hide{margin-left:auto}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}input{font-size:24px;letter-spacing:4px}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><button type="button" id="annotate" hidden>\u6807\u6CE8\u7EBF\u4E0A\uFF0F\u7EBF\u4E0B\u573A\u6B21</button></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
+</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u52A0\u5165\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u4E0D\u52A0\u5165</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
       this.panel = this.get("dialog");
       this.get("#online-first").addEventListener("click", () => actions.prefer("online"));
       this.get("#offline-first").addEventListener("click", () => actions.prefer("offline"));
-      this.get("#annotate").addEventListener("click", () => actions.annotate());
+      this.get("#single").addEventListener("click", () => actions.choosePair(false));
+      this.get("#join").addEventListener("click", () => actions.choosePair(true));
+      this.get("#annotate").addEventListener("click", () => {
+        const labels = {};
+        for (const select of this.root.querySelectorAll("#label-fields select")) if (select.value === "online" || select.value === "offline") labels[select.dataset.id] = select.value;
+        actions.annotate(labels);
+      });
       this.get("form").addEventListener("submit", (e) => {
         e.preventDefault();
         actions.submit();
@@ -728,16 +744,36 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     }
     render(state) {
       const allowed = controls(state);
-      this.get("#title").textContent = state.activity?.title ?? "\u8BB2\u5EA7\u9884\u7EA6";
+      const choosing = state.phase === "choosing", other = state.candidates?.find((a) => a.id !== state.requestedId);
+      this.get("#title").textContent = (choosing ? other?.title : state.activity?.title) ?? "\u8BB2\u5EA7\u9884\u7EA6";
+      this.get("#pair-question").hidden = !choosing;
+      this.get("#single").hidden = !choosing;
+      this.get("#join").hidden = !choosing;
       const candidates = state.candidates ?? [], paired = candidates.length === 2;
-      this.get("#candidates").hidden = !paired;
+      this.get("#candidates").hidden = !paired || choosing;
       for (const [id, value] of [["online-first", "online"], ["offline-first", "offline"]]) {
         const button = this.get("#" + id);
         button.disabled = state.phase !== "ready";
         button.setAttribute("aria-pressed", String((state.preferred ?? "online") === value));
       }
-      this.get("#annotate").hidden = !paired || Boolean(classified(candidates, state.labels));
+      this.get("#labels").hidden = !paired || Boolean(classified(candidates, state.labels));
       this.get("#annotate").disabled = state.phase !== "ready";
+      const labelsSignature = JSON.stringify([candidates.map((a) => a.id), state.labels]);
+      if (labelsSignature !== this.labelsSignature) {
+        this.labelsSignature = labelsSignature;
+        this.get("#label-fields").replaceChildren(...(paired && !classified(candidates, state.labels) ? candidates : []).map((item) => {
+          const label = document.createElement("label");
+          label.append(item.place || item.title);
+          const select = document.createElement("select");
+          select.dataset.id = item.id;
+          select.setAttribute("aria-label", "\u6807\u6CE8 " + (item.place || item.title));
+          for (const [value, text] of [["", "\u9009\u62E9\u573A\u6B21"], ["online", "\u7EBF\u4E0A"], ["offline", "\u7EBF\u4E0B"]]) select.add(new Option(text, value));
+          select.value = mode(item, state.labels) ?? "";
+          label.append(select);
+          return label;
+        }));
+      }
+      for (const select of this.root.querySelectorAll("#label-fields select")) select.disabled = state.phase !== "ready";
       const signature = JSON.stringify([candidates, state.candidateIndex, state.labels]);
       if (signature !== this.candidateSignature) {
         this.candidateSignature = signature;
@@ -786,8 +822,9 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get("#verify").hidden = state.phase !== "unknown";
       this.get("#reload").hidden = state.phase !== "success";
       this.get("#hide").hidden = !state.armed || ["submitting", "verifying"].includes(state.phase);
+      this.get("#close").hidden = choosing;
       this.get("#close").disabled = !allowed.close;
-      this.get("#preparation").hidden = state.ocrStatus !== "failed";
+      this.get("#preparation").hidden = choosing || state.ocrStatus !== "failed";
       this.get("#preparation").textContent = state.ocrMessage ?? "";
       if (["success", "failed", "unknown", "login-required"].includes(state.phase)) this.show();
     }
@@ -3840,22 +3877,10 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           mount.setActive(label ? state.activity?.id : void 0, label);
           current?.dialog.render(state);
         }, Date.now, ocr);
-        const annotate = () => {
-          const labels = { ...task.state.labels };
-          for (const item of task.state.candidates ?? []) {
-            const answer = window.prompt("\u8BF7\u6807\u6CE8\u573A\u6B21\uFF1A" + item.title + "\n\u5730\u70B9\uFF1A" + item.place + "\n\u8F93\u5165\u201C\u7EBF\u4E0A\u201D\u6216\u201C\u7EBF\u4E0B\u201D", mode(item, labels) === "online" ? "\u7EBF\u4E0A" : mode(item, labels) === "offline" ? "\u7EBF\u4E0B" : "");
-            if (answer === null) return;
-            if (answer.trim() !== "\u7EBF\u4E0A" && answer.trim() !== "\u7EBF\u4E0B") {
-              notice("\u8BF7\u8F93\u5165\u201C\u7EBF\u4E0A\u201D\u6216\u201C\u7EBF\u4E0B\u201D\uFF0C\u672A\u542F\u52A8\u9884\u7EA6");
-              return;
-            }
-            labels[item.id] = answer.trim() === "\u7EBF\u4E0A" ? "online" : "offline";
-          }
-          task.prefer(task.state.preferred ?? "online", labels);
-        };
         const dialog = new Dialog({
+          choosePair: (include) => task.choosePair(include),
           prefer: (preferred) => task.prefer(preferred),
-          annotate,
+          annotate: (labels) => task.prefer(task.state.preferred ?? "online", labels),
           submit: () => {
             void task.submit();
           },
@@ -3880,10 +3905,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         });
         current = { task, dialog, release };
         await task.open(id, recovery);
-        if (!recovery && task.state.phase === "ready" && task.state.candidates?.length === 2) {
-          const other = task.state.candidates.find((a) => a.id !== id);
-          if (!window.confirm("\u53D1\u73B0\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\uFF1A\n" + other.title + "\n" + other.place + "\n\u662F\u5426\u52A0\u5165\u5019\u9009\uFF1F\u6309\u6240\u9009\u987A\u5E8F\u9884\u7EA6\uFF0C\u53EA\u6709\u660E\u786E\u6EE1\u5458\u624D\u8F6C\u5411\u53E6\u4E00\u573A\u6B21\uFF0C\u6210\u529F\u540E\u7ED3\u675F\u3002")) task.single(id);
-        }
+        if (!recovery) task.requestPairChoice(id);
         if (recovery && task.state.phase !== "login-required") {
           if (recovery.verify) await task.restoreVerification();
           else if (task.state.phase === "ready") {

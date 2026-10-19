@@ -60,3 +60,8 @@ it('an existing booking in either variant prevents any new write',async()=>{
 it('declining the additional candidate keeps the clicked variant even when the default preferred online',async()=>{
   const{task,api}=await setup();task.single('offline');expect(task.state.candidates).toHaveLength(1);task.start();await flush();expect(api.submit).toHaveBeenCalledWith('offline','0733');
 });
+it('inline candidate choice blocks starting until a decision, without starting either target',async()=>{
+  const{task,api}=await setup();task.requestPairChoice('offline');expect(task.state.phase).toBe('choosing');expect(controls(task.state).start).toBe(false);task.start();expect(api.captcha).not.toHaveBeenCalled();
+  task.choosePair(true);expect(task.state.phase).toBe('ready');expect(task.state.candidates).toHaveLength(2);expect(api.submit).not.toHaveBeenCalled();
+  task.requestPairChoice('offline');task.choosePair(false);expect(task.state.activity?.id).toBe('offline');expect(task.state.candidates).toHaveLength(1);
+});

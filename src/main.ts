@@ -4,7 +4,6 @@ import {Dialog} from './dialog';
 import {acquireTask} from './lock';
 import {Mount} from './mount';
 import {message, Reservation} from './reservation';
-import {mode,type Labels} from './candidates';
 import {BrowserOcr} from './ocr';
 import {saveTask,readTask,clearTask,type PendingTask} from './task-store';
 // Also prevents duplicate injection in one document.
@@ -38,15 +37,11 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
         mount.setActive(label ? state.activity?.id : undefined, label);
         current?.dialog.render(state);
       }, Date.now, ocr);
-      const annotate=()=>{const labels:Labels={...task.state.labels};for(const item of task.state.candidates??[]){const answer=window.prompt('请标注场次：'+item.title+'\n地点：'+item.place+'\n输入“线上”或“线下”',mode(item,labels)==='online'?'线上':mode(item,labels)==='offline'?'线下':'');if(answer===null)return;if(answer.trim()!=='线上'&&answer.trim()!=='线下'){notice('请输入“线上”或“线下”，未启动预约');return;}labels[item.id]=answer.trim()==='线上'?'online':'offline';}task.prefer(task.state.preferred??'online',labels);};
-      const dialog = new Dialog({prefer:preferred=>task.prefer(preferred),annotate,submit: () => {void task.submit();}, edit: code => task.editCode(code), refresh: () => {void task.loadCaptcha();}, verify: () => {void task.verify();}, resume: () => {void task.resume();}, login: () => {location.reload();}, close: () => close(), reload: () => location.reload(),
+      const dialog = new Dialog({choosePair:include=>task.choosePair(include),prefer:preferred=>task.prefer(preferred),annotate:labels=>task.prefer(task.state.preferred??'online',labels),submit: () => {void task.submit();}, edit: code => task.editCode(code), refresh: () => {void task.loadCaptcha();}, verify: () => {void task.verify();}, resume: () => {void task.resume();}, login: () => {location.reload();}, close: () => close(), reload: () => location.reload(),
         start: () => task.start(), configure: seconds => task.configure(seconds), hide: () => dialog.hide()});
       current = {task, dialog, release};
       await task.open(id,recovery);
-      if(!recovery && task.state.phase==='ready' && task.state.candidates?.length===2){
-        const other=task.state.candidates.find(a=>a.id!==id)!;
-        if(!window.confirm('发现同一讲座的另一场次：\n'+other.title+'\n'+other.place+'\n是否加入候选？按所选顺序预约，只有明确满员才转向另一场次，成功后结束。'))task.single(id);
-      }
+      if(!recovery)task.requestPairChoice(id);
       if(recovery && task.state.phase!=='login-required'){if(recovery.verify)await task.restoreVerification();else if(task.state.phase==='ready'){task.configure(recovery.leadSeconds);task.start();}}
     } catch (error) {release?.(); notice(message(error));}
     finally {opening = false;}

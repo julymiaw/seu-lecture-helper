@@ -2,10 +2,10 @@ import {ApiError, type Activity, type ReservationApi} from './api';
 import type {OcrEngine} from './ocr';
 import {findCandidates,ordered,classified,mode,type Mode,type Labels} from './candidates';
 import {Diagnostics, businessReason, errorInfo} from './diagnostics';
-export type Phase = 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'input' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
+export type Phase = 'choosing' | 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'input' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
 export interface Recovery {leadSeconds:number;verify:boolean;ids?:string[];index?:number;preferred?:Mode;labels?:Labels}
 export interface State {
-  candidates?:Activity[]; candidateIndex?:number; preferred?:Mode; labels?:Labels;
+  requestedId?:string; candidates?:Activity[]; candidateIndex?:number; preferred?:Mode; labels?:Labels;
   lastFailure?:{target:string;message:string;action:string};
   phase: Phase; message: string; activity?: Activity; offset?: number; remaining?: number;
   image?: string; code?: string; leadSeconds?: number; armed?: boolean;
@@ -90,6 +90,11 @@ export class Reservation {
       if(!this.bookable())return;
       this.set('ready','');void this.prepareOcr();
     }catch(error){if(this.valid(g)){if(error instanceof ApiError && error.kind==='session')this.requireLogin();else this.stop(message(error));}}
+  }
+  requestPairChoice(id:string) {if(this.state.phase==='ready' && this.state.candidates?.length===2)this.set('choosing','',{requestedId:id});}
+  choosePair(include:boolean) {
+    if(this.state.phase!=='choosing')return;
+    const id=this.state.requestedId!;this.set('ready','',{requestedId:undefined});if(!include)this.single(id);
   }
   single(id:string) {
     if(this.state.phase!=='ready')return;

@@ -1,10 +1,11 @@
 {
   "name": "seu-lecture-helper",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "preview": "npm run build && node scripts/preview.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm test && npm run test:e2e",
