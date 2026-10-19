@@ -5,8 +5,8 @@ import {Diagnostics, businessReason, errorInfo} from './diagnostics';
 export type Phase = 'choosing' | 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'input' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
 export interface Recovery {leadSeconds:number;verify:boolean;ids?:string[];index?:number;preferred?:Mode;labels?:Labels}
 export interface State {
-  requestedId?:string; candidates?:Activity[]; candidateIndex?:number; preferred?:Mode; labels?:Labels;
-  lastFailure?:{target:string;message:string;action:string};
+  fullIds?:string[]; requestedId?:string; candidates?:Activity[]; candidateIndex?:number; preferred?:Mode; labels?:Labels;
+  lastFailure?:{target:string;message:string;action:string;reason?:string};
   phase: Phase; message: string; activity?: Activity; offset?: number; remaining?: number;
   image?: string; code?: string; leadSeconds?: number; armed?: boolean;
   ocrStatus?: 'loading' | 'ready' | 'failed'; ocrMessage?: string; verifyAfterLogin?:boolean;
@@ -84,7 +84,7 @@ export class Reservation {
       else candidates=recovery?[activity]:ordered(findCandidates(activity,data.activities),this.state.preferred!,this.state.labels);
       const index=recovery?.index??0;activity=candidates[index];
       if(!activity)throw new ApiError('恢复的候选场次无效','format');
-      this.targetId=activity.id;this.state={...this.state,activity,offset,candidates,candidateIndex:index};
+      this.targetId=activity.id;this.state={...this.state,activity,offset,candidates,candidateIndex:index,fullIds:recovery?.ids?.slice(0,index)??[]};
       const bookedIndex=candidates.findIndex(a=>a.reserved);
       if(bookedIndex>=0){this.state={...this.state,activity:candidates[bookedIndex],candidateIndex:bookedIndex};this.targetId=candidates[bookedIndex].id;this.finish('success','该讲座已有预约记录，不再预约另一场次');return;}
       if(!this.bookable())return;
@@ -235,12 +235,12 @@ export class Reservation {
       else if(reason==='captcha-rejected'||reason==='not-open')action='当前场次换图重试';
       else if(error instanceof ApiError && error.kind==='session')action='等待登录恢复';
       else if(error instanceof ApiError && (error.kind==='rate'||error.kind==='business' && reason!=='already-booked'))action='停止';
-      this.set(this.state.phase,this.state.message,{lastFailure:{target:mode(this.state.activity!,this.state.labels)==='online'?'线上':mode(this.state.activity!,this.state.labels)==='offline'?'线下':this.state.activity!.title,message:message(error),action}});
+      this.set(this.state.phase,this.state.message,{fullIds:reason==='full'?[...new Set([...(this.state.fullIds??[]),this.state.activity!.id])]:this.state.fullIds,lastFailure:{reason,target:mode(this.state.activity!,this.state.labels)==='online'?'线上':mode(this.state.activity!,this.state.labels)==='offline'?'线下':this.state.activity!.title,message:message(error),action}});
       this.diagnostics.record('warn','提交处理决定',{activityId:this.state.activity!.id,candidateMode:mode(this.state.activity!,this.state.labels),priority:(this.state.candidateIndex??0)+1,attempt:this.submissions,...errorInfo(error),action});
       if(error instanceof ApiError && error.kind==='session'){this.requireLogin();return;}
       if(error instanceof ApiError && error.kind==='rate'){this.stop(message(error));return;}
       if(error instanceof ApiError && error.kind==='business'){
-        if(reason==='full' && this.advanceCandidate())return;
+        if(reason==='full'){if(this.advanceCandidate())return;this.stop((this.state.candidates?.length??0)>1?'两个场次均已满，预约失败':'人数已满，预约失败');return;}
         if(reason==='already-booked'){await this.verify();return;}
         if(reason==='captcha-rejected' || reason==='not-open'){await this.retryCaptcha();return;}
         this.stop(error.message);return;

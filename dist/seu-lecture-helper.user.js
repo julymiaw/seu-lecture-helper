@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.6.2
+// @version      0.6.3
 // @description  提前准备验证码、人工修正、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -172,7 +172,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.6.2";
+  var version = "0.6.3";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -383,7 +383,7 @@ SOFTWARE.
         activity2 = candidates[index];
         if (!activity2) throw new ApiError("\u6062\u590D\u7684\u5019\u9009\u573A\u6B21\u65E0\u6548", "format");
         this.targetId = activity2.id;
-        this.state = { ...this.state, activity: activity2, offset, candidates, candidateIndex: index };
+        this.state = { ...this.state, activity: activity2, offset, candidates, candidateIndex: index, fullIds: recovery?.ids?.slice(0, index) ?? [] };
         const bookedIndex = candidates.findIndex((a) => a.reserved);
         if (bookedIndex >= 0) {
           this.state = { ...this.state, activity: candidates[bookedIndex], candidateIndex: bookedIndex };
@@ -603,7 +603,7 @@ SOFTWARE.
         else if (reason === "captcha-rejected" || reason === "not-open") action = "\u5F53\u524D\u573A\u6B21\u6362\u56FE\u91CD\u8BD5";
         else if (error instanceof ApiError && error.kind === "session") action = "\u7B49\u5F85\u767B\u5F55\u6062\u590D";
         else if (error instanceof ApiError && (error.kind === "rate" || error.kind === "business" && reason !== "already-booked")) action = "\u505C\u6B62";
-        this.set(this.state.phase, this.state.message, { lastFailure: { target: mode(this.state.activity, this.state.labels) === "online" ? "\u7EBF\u4E0A" : mode(this.state.activity, this.state.labels) === "offline" ? "\u7EBF\u4E0B" : this.state.activity.title, message: message(error), action } });
+        this.set(this.state.phase, this.state.message, { fullIds: reason === "full" ? [.../* @__PURE__ */ new Set([...this.state.fullIds ?? [], this.state.activity.id])] : this.state.fullIds, lastFailure: { reason, target: mode(this.state.activity, this.state.labels) === "online" ? "\u7EBF\u4E0A" : mode(this.state.activity, this.state.labels) === "offline" ? "\u7EBF\u4E0B" : this.state.activity.title, message: message(error), action } });
         this.diagnostics.record("warn", "\u63D0\u4EA4\u5904\u7406\u51B3\u5B9A", { activityId: this.state.activity.id, candidateMode: mode(this.state.activity, this.state.labels), priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, ...errorInfo(error), action });
         if (error instanceof ApiError && error.kind === "session") {
           this.requireLogin();
@@ -614,7 +614,11 @@ SOFTWARE.
           return;
         }
         if (error instanceof ApiError && error.kind === "business") {
-          if (reason === "full" && this.advanceCandidate()) return;
+          if (reason === "full") {
+            if (this.advanceCandidate()) return;
+            this.stop((this.state.candidates?.length ?? 0) > 1 ? "\u4E24\u4E2A\u573A\u6B21\u5747\u5DF2\u6EE1\uFF0C\u9884\u7EA6\u5931\u8D25" : "\u4EBA\u6570\u5DF2\u6EE1\uFF0C\u9884\u7EA6\u5931\u8D25");
+            return;
+          }
           if (reason === "already-booked") {
             await this.verify();
             return;
@@ -701,10 +705,10 @@ SOFTWARE.
       this.root.innerHTML = `<style>
 :host{all:initial;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#18251e}
 *{box-sizing:border-box}dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}dialog::backdrop{background:#10251c80}
-#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#labels{grid-column:1/-1;display:grid;gap:8px}#label-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;margin:6px 0}#annotate{justify-self:end}#pair-question{font-size:14px;color:#64776a;margin:0}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active{color:#24663b;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
+#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#labels{grid-column:1/-1;display:grid;gap:8px}#label-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;margin:6px 0}#annotate{justify-self:end}#pair-question{font-size:14px;color:#64776a;margin:0}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active,li.success{color:#24663b;font-weight:600}li.full{color:#a25f50}li.full .candidate-name{text-decoration:line-through;opacity:.8}li.failed{color:#a25f50}.candidate-status{margin-left:8px;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
 .challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}input{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}input:focus{outline:2px solid #287547;outline-offset:2px}
 p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}input{font-size:24px;letter-spacing:4px}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u52A0\u5165\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u53D6\u6D88</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
+</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u5C06\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\u4E5F\u52A0\u5165\u5019\u9009\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u53D6\u6D88</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
       this.panel = this.get("dialog");
       this.get("#online-first").addEventListener("click", () => actions.prefer("online"));
       this.get("#offline-first").addEventListener("click", () => actions.prefer("offline"));
@@ -774,21 +778,27 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         }));
       }
       for (const select of this.root.querySelectorAll("#label-fields select")) select.disabled = state.phase !== "ready";
-      const signature = JSON.stringify([candidates, state.candidateIndex, state.labels]);
+      const signature = JSON.stringify([candidates, state.candidateIndex, state.labels, state.phase, state.fullIds]);
       if (signature !== this.candidateSignature) {
         this.candidateSignature = signature;
-        const list = this.get("ol");
-        list.replaceChildren(...candidates.map((item, i) => {
-          const row = document.createElement("li");
-          row.classList.toggle("active", i === (state.candidateIndex ?? 0));
-          const m = mode(item, state.labels);
-          row.textContent = `${i + 1}. ${m === "online" ? "\u7EBF\u4E0A" : m === "offline" ? "\u7EBF\u4E0B" : "\u672A\u6807\u6CE8"} \xB7 ${item.place || item.title}${i === (state.candidateIndex ?? 0) ? " \xB7 \u5F53\u524D" : ""}`;
+        this.get("ol").replaceChildren(...candidates.map((item, i) => {
+          const row = document.createElement("li"), current = i === (state.candidateIndex ?? 0), full = state.fullIds?.includes(item.id), success = current && state.phase === "success";
+          row.classList.toggle("full", Boolean(full));
+          row.classList.toggle("success", success);
+          row.classList.toggle("failed", current && state.phase === "failed" && !full);
+          row.classList.toggle("active", current && !full && !["success", "failed"].includes(state.phase));
+          const m = mode(item, state.labels), name = document.createElement("span"), status = document.createElement("span");
+          name.className = "candidate-name";
+          status.className = "candidate-status";
+          name.textContent = `${i + 1}. ${m === "online" ? "\u7EBF\u4E0A" : m === "offline" ? "\u7EBF\u4E0B" : "\u672A\u6807\u6CE8"} \xB7 ${item.place || item.title}`;
+          status.textContent = full ? "\u5DF2\u6EE1" : success ? "\u9884\u7EA6\u6210\u529F" : !current ? "\u672A\u5C1D\u8BD5" : state.phase === "failed" ? "\u5931\u8D25" : state.phase === "unknown" ? "\u5F85\u6838\u9A8C" : state.phase === "login-required" ? "\u9700\u767B\u5F55" : state.phase === "verifying" ? "\u6838\u9A8C\u4E2D" : state.phase === "submitting" ? "\u63D0\u4EA4\u4E2D" : state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : state.armed ? "\u9884\u7EA6\u4E2D" : "\u5F85\u5F00\u59CB";
+          row.append(name, status);
           return row;
         }));
       }
       const failure = this.get("#failure");
-      failure.hidden = !state.lastFailure;
-      failure.textContent = state.lastFailure ? `${state.lastFailure.target}\uFF1A${state.lastFailure.message} \u2192 ${state.lastFailure.action}` : "";
+      failure.hidden = !state.lastFailure || state.phase === "success" || state.lastFailure.reason === "full";
+      failure.textContent = !failure.hidden && state.lastFailure ? `${state.lastFailure.target}\uFF1A${state.lastFailure.message} \u2192 ${state.lastFailure.action}` : "";
       this.get("#status").textContent = state.message;
       this.get("#status").hidden = !state.message;
       this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "input"].includes(state.phase);
@@ -813,9 +823,9 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get("#start").hidden = state.phase !== "ready";
       this.get("#start").disabled = !allowed.start;
       this.get("#start").textContent = (state.activity?.startsAt ?? 0) > Date.now() + (state.offset ?? 0) ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
-      this.get("[type=submit]").hidden = !state.image || (state.remaining ?? 0) > 0;
+      this.get("[type=submit]").hidden = !state.image || (state.remaining ?? 0) > 0 || !["waiting", "input", "recognizing"].includes(state.phase);
       this.get("[type=submit]").disabled = !allowed.submit;
-      this.get("#refresh").hidden = !state.image;
+      this.get("#refresh").hidden = !state.image || !["waiting", "input", "recognizing"].includes(state.phase);
       this.get("#refresh").disabled = !allowed.refresh;
       this.get("#login").hidden = state.phase !== "login-required";
       this.get("#resume").hidden = state.phase !== "login-required";
@@ -824,7 +834,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get("#hide").hidden = !state.armed || ["submitting", "verifying"].includes(state.phase);
       this.get("#close").hidden = choosing;
       this.get("#close").disabled = !allowed.close;
-      this.get("#preparation").hidden = choosing || state.ocrStatus !== "failed";
+      this.get("#preparation").hidden = !["ready", "waiting", "input", "recognizing"].includes(state.phase) || state.ocrStatus !== "failed";
       this.get("#preparation").textContent = state.ocrMessage ?? "";
       if (["success", "failed", "unknown", "login-required"].includes(state.phase)) this.show();
     }

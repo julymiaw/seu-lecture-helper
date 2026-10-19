@@ -9,7 +9,7 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
+async function setup(page:Page, options:{pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
   const initialTime=Date.now();
   let booked=false,bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,assetCalls=0;
   const targets:string[]=[];const events:string[]=[];
@@ -41,7 +41,7 @@ async function setup(page:Page, options:{pair?:boolean;unlabelled?:boolean;unkno
     else if(name==='addReservation.do') {
       writes++;const target=new URLSearchParams(request.postData()!).get('wid')!;targets.push(target);events.push('submit:'+target);codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
       if(options.pair&&target!== 'offline-fixture'&&options.unknownPrimary)return route.abort();
-      if(options.pair&&target!=='offline-fixture')result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
+      if(options.pair&&(target!=='offline-fixture'||options.allFull))result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
       else if(options.notOpenOnce&&writes===1) result={code:-1,datas:null,msg:'尚未开放预约'};
       else if(full)result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
       else if(options.rejectCode&&(writes===1||options.rejectCode==='three'&&writes<=3)){if(options.fullOnRejection&&writes>=2)full=true;result={code:-1,datas:null,msg:'验证码错误，请重试'};}
@@ -143,7 +143,7 @@ test('online-full fallback is serial, uses a fresh captcha, and retains the reas
   await expect(page.getByRole('button',{name:'线上优先',exact:true})).toHaveAttribute('aria-pressed','true');
   await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
   expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);expect(state.events).toEqual(['captcha','submit:'+raw.datas.hdlbList[0].WID,'captcha','submit:offline-fixture']);
-  await expect(page.locator('#failure')).toContainText('人数已满');expect(state.failures).toEqual([]);
+  await expect(page.locator('ol li').nth(0)).toContainText('已满');await expect(page.locator('ol li').nth(1)).toContainText('预约成功');await expect(page.locator('#failure')).toBeHidden();await expect(page.getByRole('button',{name:'提交预约',exact:true})).toBeHidden();await expect(page.getByRole('button',{name:'换一张',exact:true})).toBeHidden();expect(state.failures).toEqual([]);
 });
 test('one order control chooses offline first; successful first choice never submits the other',async({page})=>{
   const state=await setup(page,{pair:true});await openHelper(page);await page.getByRole('button',{name:'线下优先',exact:true}).click();
@@ -176,7 +176,7 @@ test('unclassified variants are blocked until the user supplies labels',async({p
 test('reload after backup captcha auth failure resumes the backup, not the exhausted primary',async({page})=>{
   const state=await setup(page,{pair:true,expireBackupOnce:true});await openHelper(page);await page.locator('#start').click();
   await expect(page.getByRole('status')).toContainText('登录已失效',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);
-  await page.reload();await page.addScriptTag({content:script});await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);
+  await page.reload();await page.addScriptTag({content:script});await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);await expect(page.locator('ol li').nth(0)).toContainText('已满');await expect(page.locator('ol li').nth(1)).toContainText('预约成功');
 });
 
 test('declining counterpart confirmation keeps a single target and hides the order setting',async({page})=>{
@@ -191,9 +191,18 @@ test('both variant buttons reopen the same waiting dialog without starting anoth
 test('pair confirmation stays themed and concise without native browser dialogs',async({page},testInfo)=>{
   let dialogs=0;page.on('dialog',dialog=>{dialogs++;void dialog.dismiss();});
   await setup(page,{pair:true});await page.getByRole('button',{name:'预约助手'}).first().click();
-  await expect(page.locator('#pair-question')).toHaveText('是否加入？');await expect(page.locator('#title')).toHaveText('【线下】【艺术】同一讲座');
+  await expect(page.locator('#pair-question')).toHaveText('是否将同一讲座的另一场次也加入候选？');await expect(page.locator('#title')).toHaveText('【线下】【艺术】同一讲座');
   await expect(page.locator('#start')).toBeHidden();await expect(page.locator('#candidates')).toBeHidden();
   const buttons=page.locator('#seu-lecture-helper-dialog').getByRole('button');await expect(buttons).toHaveCount(2);
   await page.screenshot({path:testInfo.outputPath('pair-confirmation.png')});
   await page.getByRole('button',{name:'加入',exact:true}).click();await expect(page.locator('#start')).toBeVisible();expect(dialogs).toBe(0);
+});
+
+test('both variants full ends with a clear failure and no submit or refresh controls',async({page})=>{
+  let dialogs=0;page.on('dialog',dialog=>{dialogs++;void dialog.dismiss();});
+  const state=await setup(page,{pair:true,allFull:true});await openHelper(page);await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('两个场次均已满，预约失败',{timeout:20000});
+  await expect(page.locator('ol li.full')).toHaveCount(2);await expect(page.locator('#failure')).toBeHidden();
+  await expect(page.getByRole('button',{name:'提交预约',exact:true})).toBeHidden();await expect(page.getByRole('button',{name:'换一张',exact:true})).toBeHidden();
+  expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);expect(dialogs).toBe(0);
 });

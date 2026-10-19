@@ -118,7 +118,15 @@ it('pair confirmation uses only the counterpart title, question and two themed b
   const a={choosePair:vi.fn(),prefer:vi.fn(),annotate:vi.fn(),submit:vi.fn(),edit:vi.fn(),refresh:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),configure:vi.fn(),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
   const d=new Dialog(a),online={...await sample(),id:'on',title:'【线上】【艺术】同一讲座'},offline={...online,id:'off',title:'【线下】【艺术】同一讲座'};
   d.render({phase:'choosing',message:'',activity:online,candidates:[online,offline],requestedId:'on'});
-  expect(d.root.querySelector('#title')!.textContent).toBe(offline.title);expect(d.root.querySelector('#pair-question')!.textContent).toBe('是否加入？');
+  expect(d.root.querySelector('#title')!.textContent).toBe(offline.title);expect(d.root.querySelector('#pair-question')!.textContent).toBe('是否将同一讲座的另一场次也加入候选？');
   expect(d.root.querySelector('#candidates')!.hasAttribute('hidden')).toBe(true);expect(d.root.querySelector('#start')!.hasAttribute('hidden')).toBe(true);expect(d.root.querySelector('#close')!.hasAttribute('hidden')).toBe(true);
   d.root.querySelector<HTMLButtonElement>('#join')!.click();expect(a.choosePair).toHaveBeenCalledWith(true);d.destroy();
+});
+it('updates each candidate outcome through verification and success, then removes stale failure and challenge actions',async()=>{
+  const a={choosePair:vi.fn(),prefer:vi.fn(),annotate:vi.fn(),submit:vi.fn(),edit:vi.fn(),refresh:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),configure:vi.fn(),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
+  const d=new Dialog(a),online={...await sample(),id:'on',title:'【线上】同一讲座'},offline={...online,id:'off',title:'【线下】同一讲座'};
+  const state={phase:'verifying' as const,message:'正在核验',activity:offline,candidates:[online,offline],candidateIndex:1,fullIds:['on'],image:'image',code:'1234',lastFailure:{target:'线上',reason:'full',message:'人数已满，请重新选择',action:'切换下一候选'}};
+  d.render(state);expect(d.root.querySelectorAll('li')[0].textContent).toContain('已满');expect(d.root.querySelectorAll('li')[1].textContent).toContain('核验中');expect(d.root.querySelector('#failure')!.hasAttribute('hidden')).toBe(true);
+  d.render({...state,phase:'success',message:'预约成功'});expect(d.root.querySelectorAll('li')[1].textContent).toContain('预约成功');expect(d.root.querySelectorAll('li')[1].classList.contains('success')).toBe(true);
+  expect(d.root.querySelector('#failure')!.textContent).toBe('');expect(d.root.querySelector('[type=submit]')!.hasAttribute('hidden')).toBe(true);expect(d.root.querySelector('#refresh')!.hasAttribute('hidden')).toBe(true);d.destroy();
 });
