@@ -32,12 +32,13 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
       if (!release) {notice('另一个标签页正在进行预约，请先关闭那里的任务'); return;}
       const task = new Reservation(api, state => {
         saveTask(state);
-        if (state.activity && state.phase !== 'closed') mount.setReserved(state.activity.id, state.activity.reserved);
-        const label = state.phase === 'waiting' ? '等待中' : ['captcha-loading', 'recognizing', 'input', 'submitting', 'verifying'].includes(state.phase) ? '预约中' : '';
+        if (state.verifiedId) mount.setReserved(state.verifiedId,true);
+        else if (state.activity && state.phase !== 'closed') mount.setReserved(state.activity.id, state.activity.reserved);
+        const label = state.phase === 'waiting' ? '等待中' : ['captcha-loading', 'recognizing', 'prepared', 'submitting', 'verifying'].includes(state.phase) ? '预约中' : '';
         mount.setActive(label ? state.activity?.id : undefined, label);
         current?.dialog.render(state);
       }, Date.now, ocr);
-      const dialog = new Dialog({choosePair:include=>task.choosePair(include),prefer:preferred=>task.prefer(preferred),annotate:labels=>task.prefer(task.state.preferred??'online',labels),submit: () => {void task.submit();}, edit: code => task.editCode(code), refresh: () => {void task.loadCaptcha();}, verify: () => {void task.verify();}, resume: () => {void task.resume();}, login: () => {location.reload();}, close: () => close(), reload: () => location.reload(),
+      const dialog = new Dialog({choosePair:include=>task.choosePair(include),prefer:preferred=>task.prefer(preferred),annotate:labels=>task.prefer(task.state.preferred??'online',labels),verify: () => {void task.verify();}, resume: () => {void task.resume();}, login: () => {location.reload();}, close: () => close(), reload: () => location.reload(),
         start: () => task.start(), configure: seconds => task.configure(seconds), hide: () => dialog.hide()});
       current = {task, dialog, release};
       await task.open(id,recovery);

@@ -9,9 +9,10 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
+async function setup(page:Page, options:{expireSubmitOnce?:boolean;resumeStatus?:number;failResumeOnce?:boolean;bookedInitially?:boolean;pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
   const initialTime=Date.now();
-  let booked=false,bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,assetCalls=0;
+  let resumeFailures=0,expiredWrite=false;
+  let booked=Boolean(options.bookedInitially),bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,assetCalls=0;
   const targets:string[]=[];const events:string[]=[];
   const codes:string[]=[];
   const failures:string[]=[];
@@ -36,10 +37,11 @@ async function setup(page:Page, options:{pair?:boolean;unlabelled?:boolean;unkno
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(options.pair){const first=data.datas.hdlbList[0];first.JZMC=options.unlabelled?'【艺术】同一讲座':'【线上】【艺术】同一讲座';first.JZDD='腾讯会议';const second={...first,WID:'offline-fixture',JZMC:options.unlabelled?'【艺术】同一讲座':'【线下】【艺术】同一讲座',JZDD:'九龙湖报告厅'};data.datas.hdlbList=[first,second];data.datas.hdrsList=[{HD_WID:first.WID,YYRS:0},{HD_WID:second.WID,YYRS:0}];}
-    if(name==='queryActivityList.do') result=data;
+    if(name==='queryActivityList.do') {if(options.failResumeOnce&&captchaCalls>0&&resumeFailures++===0)return route.fulfill({status:options.resumeStatus??401,body:'unavailable'});result=data;}
     else if(name==='vcode.do') {captchaCalls++;events.push('captcha');if(options.expireBackupOnce&&captchaCalls===2)return route.fulfill({status:401,body:'unauthorized'});if(options.expireProbeOnce&&captchaCalls===1)return route.fulfill({status:401,body:'unauthorized'});result={code:0,datas:image};}
     else if(name==='addReservation.do') {
       writes++;const target=new URLSearchParams(request.postData()!).get('wid')!;targets.push(target);events.push('submit:'+target);codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
+      if(options.expireSubmitOnce&&!expiredWrite&&(!options.pair||target==='offline-fixture')){expiredWrite=true;booked=true;bookedId=target;return route.fulfill({status:401,body:'unauthorized'});}
       if(options.pair&&target!== 'offline-fixture'&&options.unknownPrimary)return route.abort();
       if(options.pair&&(target!=='offline-fixture'||options.allFull))result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
       else if(options.notOpenOnce&&writes===1) result={code:-1,datas:null,msg:'尚未开放预约'};
@@ -70,27 +72,27 @@ test('installed bundle uses real WASM/model to recognize and submit, with safe d
   const logs:string[]=[];page.on('console',msg=>{logs.push(msg.text());});
   await context.addCookies([{name:'cdn-test-cookie',value:'must-not-be-sent',url:'https://cdn.jsdelivr.net'}]);
   const state=await setup(page);await openHelper(page);await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
+  await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});
   expect(state.writes()).toBe(1);expect(state.codes).toEqual(['3253']);expect(state.assetCalls()).toBe(3);expect(state.failures).toEqual([]);
   expect(logs.join('\n')).toContain('SEU预约助手');expect(logs.join('\n')).not.toContain('data:image');
   expect(logs.join('\n')).not.toContain('VerifyOutputSizes');
   expect(logs.join('\n')).not.toContain('Expected shape from model');
 });
-test('early image and OCR are editable; opening submits the correction, not the original OCR',async({page},testInfo)=>{
+test('early OCR result is read-only and submitted automatically at opening',async({page},testInfo)=>{
   await page.clock.install();const state=await setup(page,{future:true});await openHelper(page);await page.locator('#start').click();
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});expect(state.captchaCalls()).toBe(0);
   await page.clock.fastForward(3571000);
-  await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});expect(state.writes()).toBe(0);
+  await expect(page.getByLabel('OCR识别结果',{exact:true})).toHaveText('3253',{timeout:20000});expect(state.writes()).toBe(0);
   await expect(page.getByRole('img',{name:'预约验证码'})).toBeVisible();
-  await page.getByLabel('验证码',{exact:true}).fill('0006');
+  await expect(page.locator('#seu-lecture-helper-dialog input')).toHaveCount(0);await expect(page.getByRole('button',{name:'提交预约',exact:true})).toHaveCount(0);
   await page.screenshot({path:testInfo.outputPath('prepared-captcha.png')});
-  await page.clock.fastForward(30000);await expect(page.getByRole('status')).toContainText('已核验');expect(state.codes).toEqual(['0006']);expect(state.captchaCalls()).toBe(1);
+  await page.clock.fastForward(30000);await expect(page.locator('#status')).toContainText('已核验');expect(state.codes).toEqual(['3253']);expect(state.captchaCalls()).toBe(1);
 });
 test('prefetched captcha rejected by server refreshes automatically and succeeds',async({page})=>{
   await page.clock.install();const state=await setup(page,{future:true,rejectCode:true});await openHelper(page);await page.locator('#start').click();
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3571000);
-  await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});await page.clock.fastForward(30000);
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);
+  await expect(page.getByLabel('OCR识别结果',{exact:true})).toHaveText('3253',{timeout:20000});await page.clock.fastForward(30000);
+  await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);
 });
 test('cached resources survive a new page; no removed mode or monitoring controls',async({page})=>{
   const state=await setup(page,{future:true});await openHelper(page);
@@ -99,27 +101,25 @@ test('cached resources survive a new page; no removed mode or monitoring control
   expect(state.captchaCalls()).toBe(0);await page.getByRole('button',{name:'关闭',exact:true}).click();await page.reload();await page.addScriptTag({content:script});await openHelper(page);
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});expect(state.assetCalls()).toBe(3);
 });
-test('unavailable model keeps the image editable, with manual submission and no mode switch',async({page})=>{
-  const state=await setup(page,{blocked:true});await openHelper(page);
-  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','failed',{timeout:20000});await page.locator('#start').click();
-  await expect(page.getByLabel('验证码',{exact:true})).toBeFocused();await page.getByLabel('验证码',{exact:true}).fill('3253');await page.getByLabel('验证码',{exact:true}).press('Enter');
-  await expect(page.getByRole('status')).toContainText('已核验');expect(state.codes).toEqual(['3253']);
+test('unavailable model stops with diagnostics and no manual fallback',async({page})=>{
+  const state=await setup(page,{blocked:true});await openHelper(page);await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','failed',{timeout:20000});await page.locator('#start').click();
+  await expect(page.locator('#status')).toContainText('OCR 引擎准备失败',{timeout:20000});expect(state.writes()).toBe(0);await expect(page.locator('#seu-lecture-helper-dialog input')).toHaveCount(0);await expect(page.getByRole('button',{name:'提交预约',exact:true})).toHaveCount(0);
 });
 test('retry stops when capacity becomes full; no ongoing monitoring',async({page})=>{
   await page.clock.install();const state=await setup(page,{rejectCode:'three',fullOnRejection:true});await openHelper(page);await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('人数已满',{timeout:20000});const count=state.captchaCalls();await page.clock.fastForward(120000);expect(state.captchaCalls()).toBe(count);expect(state.writes()).toBe(3);
+  await expect(page.locator('#status')).toContainText('人数已满',{timeout:20000});const count=state.captchaCalls();await page.clock.fastForward(120000);expect(state.captchaCalls()).toBe(count);expect(state.writes()).toBe(3);
 });
 test('compact dialog fits a narrow viewport and reopen retains the answer',async({page},testInfo)=>{
   await page.clock.install();const state=await setup(page,{future:true});await page.setViewportSize({width:375,height:700});await openHelper(page);await page.locator('#start').click();
-  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3571000);await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});
-  await page.getByRole('button',{name:'收起',exact:true}).click();await page.getByRole('button',{name:'预约中'}).first().click();await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253');
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3571000);await expect(page.getByLabel('OCR识别结果',{exact:true})).toHaveText('3253',{timeout:20000});
+  await page.getByRole('button',{name:'收起',exact:true}).click();await page.getByRole('button',{name:'预约中'}).first().click();await expect(page.getByLabel('OCR识别结果',{exact:true})).toHaveText('3253');
   const fits=await page.locator('#seu-lecture-helper-dialog').locator('dialog').evaluate(el=>el.scrollHeight<=el.clientHeight && el.scrollWidth<=el.clientWidth);expect(fits).toBe(true);
   await page.screenshot({path:testInfo.outputPath('prepared-mobile.png')});expect(state.writes()).toBe(0);
 });
 
 test('not-open boundary refreshes captcha before submitting again',async({page})=>{
   const state=await setup(page,{notOpenOnce:true});await openHelper(page);await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
+  await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);expect(state.failures).toEqual([]);
 });
 
 test('refresh restores the waiting task without another start click',async({page})=>{
@@ -127,28 +127,28 @@ test('refresh restores the waiting task without another start click',async({page
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
   await page.reload();await page.addScriptTag({content:script});await expect(page.locator('#seu-lecture-helper-dialog')).toBeAttached();await expect(page.locator('#start')).toBeHidden();
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3601000);
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);
+  await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);
 });
 test('expired session pauses, refresh returns to the saved task, and fresh captcha completes booking',async({page})=>{
   await page.clock.install();const state=await setup(page,{future:true,expireProbeOnce:true});await openHelper(page);await page.locator('#start').click();
-  await page.clock.fastForward(61000);await expect(page.getByRole('status')).toContainText('登录已失效');expect(state.writes()).toBe(0);
+  await page.clock.fastForward(61000);await expect(page.locator('#status')).toContainText('登录已失效');expect(state.writes()).toBe(0);
   await expect(page.getByRole('button',{name:'重新登录',exact:true})).toBeVisible();await page.reload();await page.addScriptTag({content:script});
   await expect(page.locator('#start')).toBeHidden();await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3540000);
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);
+  await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);
 });
 
 
 test('online-full fallback is serial, uses a fresh captcha, and retains the reason',async({page})=>{
   const state=await setup(page,{pair:true});await openHelper(page);
   await expect(page.getByRole('button',{name:'线上优先',exact:true})).toHaveAttribute('aria-pressed','true');
-  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
+  await page.locator('#start').click();await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});
   expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);expect(state.events).toEqual(['captcha','submit:'+raw.datas.hdlbList[0].WID,'captcha','submit:offline-fixture']);
   await expect(page.locator('ol li').nth(0)).toContainText('已满');await expect(page.locator('ol li').nth(1)).toContainText('预约成功');await expect(page.locator('#failure')).toBeHidden();await expect(page.getByRole('button',{name:'提交预约',exact:true})).toBeHidden();await expect(page.getByRole('button',{name:'换一张',exact:true})).toBeHidden();expect(state.failures).toEqual([]);
 });
 test('one order control chooses offline first; successful first choice never submits the other',async({page})=>{
   const state=await setup(page,{pair:true});await openHelper(page);await page.getByRole('button',{name:'线下优先',exact:true}).click();
   await expect(page.locator('#labels')).toBeHidden();await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual(['offline-fixture']);
+  await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual(['offline-fixture']);
 });
 test('paired waiting layout fits mobile and preserves order across reload',async({page},testInfo)=>{
   await page.clock.install();await setup(page,{pair:true,future:true});await page.setViewportSize({width:375,height:700});
@@ -158,30 +158,30 @@ test('paired waiting layout fits mobile and preserves order across reload',async
   await expect(page.locator('#seu-lecture-helper-dialog').locator('dialog')).toBeVisible();
   expect(await page.locator('#seu-lecture-helper-dialog').locator('dialog').evaluate(el=>el.scrollWidth<=el.clientWidth&&el.scrollHeight<=el.clientHeight)).toBe(true);
   await page.screenshot({path:testInfo.outputPath('candidate-mobile.png')});
-  await page.clock.fastForward(3571000);await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});
+  await page.clock.fastForward(3571000);await expect(page.getByLabel('OCR识别结果',{exact:true})).toHaveText('3253',{timeout:20000});
   expect(await page.locator('#seu-lecture-helper-dialog').locator('dialog').evaluate(el=>el.scrollWidth<=el.clientWidth&&el.scrollHeight<=el.clientHeight)).toBe(true);
   await page.screenshot({path:testInfo.outputPath('candidate-prepared-mobile.png')});
   await page.setViewportSize({width:1280,height:800});await page.screenshot({path:testInfo.outputPath('candidate-prepared-desktop.png')});
 });
 test('unknown primary result never starts the fallback',async({page})=>{
   const state=await setup(page,{pair:true,unknownPrimary:true});await openHelper(page);await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('结果待确认',{timeout:20000});
+  await expect(page.locator('#status')).toContainText('结果待确认',{timeout:20000});
   expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);expect(state.captchaCalls()).toBe(1);
 });
 test('unclassified variants are blocked until the user supplies labels',async({page})=>{
   const state=await setup(page,{pair:true,unlabelled:true});await openHelper(page);await expect(page.locator('#start')).toBeDisabled();
   await page.getByLabel('标注 腾讯会议',{exact:true}).selectOption('online');await page.getByLabel('标注 九龙湖报告厅',{exact:true}).selectOption('offline');await page.getByRole('button',{name:'应用标注',exact:true}).click();await expect(page.locator('#start')).toBeEnabled();
-  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);
+  await page.locator('#start').click();await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);
 });
 test('reload after backup captcha auth failure resumes the backup, not the exhausted primary',async({page})=>{
   const state=await setup(page,{pair:true,expireBackupOnce:true});await openHelper(page);await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('登录已失效',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);
-  await page.reload();await page.addScriptTag({content:script});await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);await expect(page.locator('ol li').nth(0)).toContainText('已满');await expect(page.locator('ol li').nth(1)).toContainText('预约成功');
+  await expect(page.locator('#status')).toContainText('登录已失效',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);
+  await page.reload();await page.addScriptTag({content:script});await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);await expect(page.locator('ol li').nth(0)).toContainText('已满');await expect(page.locator('ol li').nth(1)).toContainText('预约成功');
 });
 
 test('declining counterpart confirmation keeps a single target and hides the order setting',async({page})=>{
   const state=await setup(page,{pair:true,declinePair:true});await openHelper(page,false);await expect(page.getByRole('group',{name:'候选顺序'})).toBeHidden();
-  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('人数已满',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);
+  await page.locator('#start').click();await expect(page.locator('#status')).toContainText('人数已满',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);
 });
 
 test('both variant buttons reopen the same waiting dialog without starting another task',async({page})=>{
@@ -201,8 +201,37 @@ test('pair confirmation stays themed and concise without native browser dialogs'
 test('both variants full ends with a clear failure and no submit or refresh controls',async({page})=>{
   let dialogs=0;page.on('dialog',dialog=>{dialogs++;void dialog.dismiss();});
   const state=await setup(page,{pair:true,allFull:true});await openHelper(page);await page.locator('#start').click();
-  await expect(page.getByRole('status')).toContainText('两个场次均已满，预约失败',{timeout:20000});
+  await expect(page.locator('#status')).toContainText('两个场次均已满，预约失败',{timeout:20000});
   await expect(page.locator('ol li.full')).toHaveCount(2);await expect(page.locator('#failure')).toBeHidden();
   await expect(page.getByRole('button',{name:'提交预约',exact:true})).toBeHidden();await expect(page.getByRole('button',{name:'换一张',exact:true})).toBeHidden();
   expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);expect(dialogs).toBe(0);
+});
+
+
+test('failed login restore followed by reload retains the whole offline-first group',async({page})=>{
+  await page.clock.install();const state=await setup(page,{pair:true,future:true,expireProbeOnce:true,failResumeOnce:true});await openHelper(page);await page.getByRole('button',{name:'线下优先',exact:true}).click();await page.locator('#start').click();
+  await page.clock.fastForward(61000);await expect(page.locator('#status')).toContainText('登录已失效');
+  const before=await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'));
+  await page.getByRole('button',{name:'登录后恢复',exact:true}).click();await expect(page.locator('#status')).toContainText('登录已失效');
+  expect(await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'))).toBe(before);
+  await page.reload();await page.addScriptTag({content:script});await expect(page.locator('#candidates li')).toHaveCount(2);await expect(page.getByRole('button',{name:'线下优先',exact:true})).toHaveAttribute('aria-pressed','true');
+  await page.clock.fastForward(3540000);await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual(['offline-fixture']);
+});
+test('expired pending submission restores verification without preparing OCR or writing again',async({page})=>{
+  const state=await setup(page,{bookedInitially:true});
+  await page.evaluate(id=>sessionStorage.setItem('seu-lecture-pending-task',JSON.stringify({id,endsAt:Date.now()-60000,leadSeconds:30,verify:true})),raw.datas.hdlbList[0].WID);
+  await page.reload();await page.addScriptTag({content:script});await expect(page.locator('#status')).toContainText('已核验');
+  expect(state.assetCalls()).toBe(0);expect(state.captchaCalls()).toBe(0);expect(state.writes()).toBe(0);expect(await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'))).toBeNull();await expect(page.locator('[data-activity-id="'+raw.datas.hdlbList[0].WID+'"]')).toHaveText('已预约');
+});
+
+test('same-page login recovery preserves candidate outcomes and updates the booked button',async({page})=>{
+  const state=await setup(page,{pair:true,expireSubmitOnce:true});await openHelper(page);await page.locator('#start').click();await expect(page.locator('#status')).toContainText('登录已失效',{timeout:20000});
+  expect(state.writes()).toBe(2);await page.getByRole('button',{name:'登录后恢复',exact:true}).click();await expect(page.locator('#status')).toContainText('已核验');
+  await expect(page.locator('#title')).toHaveText('【线下】【艺术】同一讲座');await expect(page.locator('#candidates li').first()).toContainText('已满');await expect(page.locator('#candidates li').nth(1)).toContainText('预约成功');await expect(page.locator('[data-activity-id="offline-fixture"]')).toHaveText('已预约');
+  expect(state.writes()).toBe(2);expect(state.captchaCalls()).toBe(2);await expect(page.locator('#failure')).toBeHidden();
+});
+test('temporary metadata failure on recovery retains the pending group for reload',async({page})=>{
+  await page.clock.install();const state=await setup(page,{pair:true,future:true,expireProbeOnce:true,failResumeOnce:true,resumeStatus:502});await openHelper(page);await page.locator('#start').click();await page.clock.fastForward(61000);await expect(page.locator('#status')).toContainText('登录已失效');
+  const before=await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'));await page.getByRole('button',{name:'登录后恢复',exact:true}).click();await expect(page.locator('#status')).toContainText('502');expect(await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'))).toBe(before);
+  await page.reload();await page.addScriptTag({content:script});await expect(page.locator('#candidates li')).toHaveCount(2);await page.clock.fastForward(3540000);await expect(page.locator('#status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);
 });

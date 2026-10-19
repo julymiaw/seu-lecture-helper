@@ -43,6 +43,6 @@ describe('pinned OCR asset loading', () => {
   });
   it('never accepts wrong bytes or retries indefinitely', async () => {
     vi.stubGlobal('crypto',webcrypto); storage(); const transport=vi.fn(async()=>new Response('bad')); vi.stubGlobal('fetch',transport);
-    await expect(loadAsset(asset)).rejects.toThrow('手动'); expect(transport).toHaveBeenCalledTimes(2);
+    await expect(loadAsset(asset)).rejects.toThrow('加载失败'); expect(transport).toHaveBeenCalledTimes(2);
   });
 });

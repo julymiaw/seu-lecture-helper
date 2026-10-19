@@ -27,7 +27,7 @@ export async function loadAsset(asset: Asset): Promise<ArrayBuffer> {
       if (!await validAsset(buffer, asset)) throw new Error('资源校验失败');
       try {await cache?.put(urls[0], new Response(buffer));} catch { /* Nonessential disk cache. */ }
       return buffer;
-    } catch { /* Try the second pinned mirror once, then fall back to manual input. */ }
+    } catch { /* Try the second pinned mirror once, then report initialization failure. */ }
   }
-  throw new Error('OCR 资源加载失败，请使用手动输入，稍后重新打开弹窗重试');
+  throw new Error('OCR 资源加载失败，无法完成自动预约');
 }

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.6.3
-// @description  提前准备验证码、人工修正、线上线下串行候选、会话恢复与结果核验
+// @version      0.7.0
+// @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
 // @run-at       document-idle
@@ -172,7 +172,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.6.3";
+  var version = "0.7.0";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -267,12 +267,9 @@ SOFTWARE.
   }
   function controls(state, now = Date.now()) {
     const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now + (state.offset ?? 0) < a.endsAt && (!fullCapacity(state) || (state.candidates?.length ?? 0) > 1));
-    const editable = active && ["waiting", "input", "recognizing"].includes(state.phase) && Boolean(state.image);
     return {
       start: active && state.phase === "ready" && Boolean(classified(state.candidates ?? (a ? [a] : []), state.labels)),
-      edit: editable,
-      refresh: editable,
-      submit: editable && now + (state.offset ?? 0) >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
+      submit: active && state.phase === "prepared" && now + (state.offset ?? 0) >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
       close: !["submitting", "verifying"].includes(state.phase)
     };
   }
@@ -291,7 +288,7 @@ SOFTWARE.
     wake;
     round = 0;
     submissions = 0;
-    incomplete = false;
+    preparing;
     targetId;
     recovery;
     nextSessionCheck = 0;
@@ -306,7 +303,7 @@ SOFTWARE.
     }
     stage(name, operation, stale = () => false) {
       const g = this.generation;
-      return this.diagnostics.measure(name, operation, { activityId: this.state.activity?.id, candidateMode: this.state.activity ? mode(this.state.activity, this.state.labels) : void 0, priority: (this.state.candidateIndex ?? 0) + 1, round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
+      return this.diagnostics.measure(name, operation, { activityId: this.state.activity?.id ?? this.targetId, candidateMode: this.state.activity ? mode(this.state.activity, this.state.labels) : void 0, priority: (this.state.candidateIndex ?? 0) + 1, round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
     }
     set(phase, message2, extra = {}) {
       const from = this.state.phase;
@@ -335,16 +332,23 @@ SOFTWARE.
       ++this.ocrEpoch;
       this.finish("failed", text);
     }
-    async prepareOcr() {
+    prepareOcr() {
+      if (this.state.ocrStatus === "ready") return Promise.resolve(true);
+      if (this.preparing) return this.preparing;
       const g = this.generation;
-      this.set(this.state.phase, this.state.message, { ocrStatus: "loading" });
-      try {
-        if (!this.ocr) throw new Error("\u672C\u5730\u8BC6\u522B\u4E0D\u53EF\u7528");
-        await this.stage("OCR\u51C6\u5907\u4E0E\u9884\u70ED", () => this.ocr.prepare());
-        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "ready", ocrMessage: void 0 });
-      } catch (error) {
-        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "failed", ocrMessage: "\u8BC6\u522B\u5F15\u64CE\u4E0D\u53EF\u7528\uFF0C\u8BF7\u586B\u5199\u9A8C\u8BC1\u7801" });
-      }
+      this.set(this.state.phase, this.state.message, { ocrStatus: "loading", ocrMessage: void 0 });
+      const pending = this.stage("OCR\u51C6\u5907\u4E0E\u9884\u70ED", () => this.ocr.prepare()).then(() => {
+        if (!this.valid(g)) return false;
+        this.set(this.state.phase, this.state.message, { ocrStatus: "ready", ocrMessage: void 0 });
+        return true;
+      }).catch(() => {
+        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "failed", ocrMessage: this.state.armed ? "OCR \u51C6\u5907\u5931\u8D25" : "OCR \u51C6\u5907\u5931\u8D25\uFF0C\u542F\u52A8\u65F6\u81EA\u52A8\u91CD\u8BD5" });
+        return false;
+      }).finally(() => {
+        if (this.preparing === pending) this.preparing = void 0;
+      });
+      this.preparing = pending;
+      return pending;
     }
     async open(id, recovery) {
       this.targetId = id;
@@ -353,12 +357,16 @@ SOFTWARE.
       this.diagnostics = new Diagnostics();
       this.round = 0;
       this.submissions = 0;
-      this.incomplete = false;
+      this.preparing = void 0;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
       this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: recovery?.leadSeconds ?? 30, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online", labels: recovery?.labels };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id });
+      if (recovery?.verify) {
+        this.set("unknown", "\u6062\u590D\u540E\u5148\u6838\u9A8C\u4E4B\u524D\u7684\u63D0\u4EA4\u7ED3\u679C");
+        return;
+      }
       try {
         const data = await this.stage("\u6D3B\u52A8\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
@@ -432,7 +440,7 @@ SOFTWARE.
       clearTimeout(this.timer);
       clearTimeout(this.retryTimer);
       this.round = 0;
-      this.incomplete = false;
+      this.preparing = void 0;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
       this.targetId = next.id;
@@ -462,18 +470,21 @@ SOFTWARE.
     }
     async resume() {
       if (this.state.phase !== "login-required" || !this.targetId) return;
-      const activity2 = this.state.activity, id = this.targetId, lead = this.state.leadSeconds ?? 30, verify = this.state.verifyAfterLogin;
-      const recovery = { leadSeconds: lead, verify: Boolean(verify), ids: this.state.candidates?.map((a) => a.id) ?? this.recovery?.ids, index: this.state.candidateIndex ?? this.recovery?.index, preferred: this.state.preferred, labels: this.state.labels };
+      if (this.state.verifyAfterLogin) {
+        await this.restoreVerification();
+        return;
+      }
+      const snapshot = this.state, id = this.targetId, lead = this.state.leadSeconds ?? 30;
+      const recovery = { leadSeconds: lead, verify: false, ids: this.state.candidates?.map((a) => a.id) ?? this.recovery?.ids, index: this.state.candidateIndex ?? this.recovery?.index, preferred: this.state.preferred, labels: this.state.labels };
       await this.open(id, recovery);
-      if (this.state.phase === "login-required") this.set("login-required", this.state.message, { activity: activity2, leadSeconds: lead, armed: true, verifyAfterLogin: verify });
-      else if (verify) await this.restoreVerification();
+      if (this.state.phase === "login-required") this.set("login-required", this.state.message, { ...snapshot, leadSeconds: lead, armed: Boolean(snapshot.armed) });
       else if (this.state.phase === "ready") {
         this.configure(lead);
         this.start();
       }
     }
     async restoreVerification() {
-      if (!this.state.activity || this.state.phase === "closed") return;
+      if (!this.targetId || this.state.phase === "closed") return;
       this.set("unknown", "\u6062\u590D\u540E\u5148\u6838\u9A8C\u4E4B\u524D\u7684\u63D0\u4EA4\u7ED3\u679C", { armed: false });
       await this.verify();
     }
@@ -507,32 +518,24 @@ SOFTWARE.
       if (this.round === 0 && !this.sessionChecking && remaining <= (this.state.leadSeconds ?? 30) * 1e3) void this.loadCaptcha();
       if (remaining <= 0) {
         if (controls(this.state, this.now()).submit) void this.submit();
-        else if (this.incomplete) void this.retryCaptcha();
         return;
       }
       const delay = Math.min(250, remaining);
       this.expectedTickAt = this.now() + delay;
       this.timer = setTimeout(this.tick, delay);
     };
-    editCode(code) {
-      if (!controls(this.state, this.now()).edit) return;
-      ++this.ocrEpoch;
-      this.set("input", "", { code: code.replace(/\D/g, "").slice(0, 4) });
-      this.diagnostics.record("log", "\u4EBA\u5DE5\u4FEE\u6539\u9A8C\u8BC1\u7801");
-    }
     async loadCaptcha() {
-      if (!this.state.armed || !["waiting", "input", "recognizing"].includes(this.state.phase) || !this.bookable()) return;
+      if (!this.state.armed || this.state.phase !== "waiting" || !this.bookable()) return;
       const g = this.generation, epoch = ++this.ocrEpoch;
-      this.incomplete = false;
       ++this.round;
       this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedCaptureAt: new Date(this.state.activity.startsAt - (this.state.offset ?? 0) - (this.state.leadSeconds ?? 30) * 1e3).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + (this.state.leadSeconds ?? 30) * 1e3, serverOffsetMs: this.state.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const image = await this.stage("\u9A8C\u8BC1\u7801\u83B7\u53D6", () => this.api.captcha());
-          if (!this.valid(g) || epoch !== this.ocrEpoch) return;
-          this.set("input", "", { image });
-          if (this.state.ocrStatus !== "failed" && this.ocr) void this.recognize(image, epoch);
+          if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
+          this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801", { image });
+          void this.recognize(image, epoch);
           return;
         } catch (error) {
           if (!this.valid(g)) return;
@@ -551,40 +554,38 @@ SOFTWARE.
     }
     async recognize(image, epoch) {
       const g = this.generation;
-      this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801");
+      const waitedForPrewarm = Boolean(this.preparing);
+      let prepared = await this.prepareOcr();
+      if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
+      if (!prepared && waitedForPrewarm) {
+        prepared = await this.prepareOcr();
+        if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
+      }
+      if (!prepared) {
+        this.stop("OCR \u5F15\u64CE\u51C6\u5907\u5931\u8D25\uFF0C\u9884\u7EA6\u5DF2\u505C\u6B62\uFF1B\u8BE6\u89C1 Console");
+        return;
+      }
       try {
         const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch)).trim();
-        if (!this.valid(g) || epoch !== this.ocrEpoch) return;
+        if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
         this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { length: code.length, valid: /^\d{4}$/.test(code) });
         if (!/^\d{4}$/.test(code)) {
-          await this.ocrFailed();
+          await this.retryCaptcha();
           return;
         }
-        this.set("input", "", { code, ocrStatus: "ready" });
+        this.set("prepared", "", { code, ocrStatus: "ready" });
         if (this.serverNow() >= this.state.activity.startsAt) await this.submit();
       } catch {
-        if (this.valid(g) && epoch === this.ocrEpoch) await this.ocrFailed();
+        if (this.valid(g) && epoch === this.ocrEpoch) await this.retryCaptcha();
       }
-    }
-    async ocrFailed() {
-      if (this.state.ocrStatus === "failed") {
-        this.set("input", "\u8BC6\u522B\u5F15\u64CE\u4E0D\u53EF\u7528\uFF0C\u8BF7\u586B\u5199\u9A8C\u8BC1\u7801");
-        return;
-      }
-      if (this.serverNow() < this.state.activity.startsAt) {
-        this.set("input", "\u8BC6\u522B\u5931\u8D25\uFF0C\u53EF\u4FEE\u6539\u9A8C\u8BC1\u7801\uFF1B\u5F00\u653E\u540E\u81EA\u52A8\u6362\u56FE\u91CD\u8BD5");
-        this.incomplete = true;
-        return;
-      }
-      await this.retryCaptcha();
     }
     async retryCaptcha() {
       this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5");
-      this.set("input", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
+      this.set("waiting", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
       await this.loadCaptcha();
     }
     async submit() {
-      if (!controls(this.state, this.now()).submit || !this.bookable()) return;
+      if (!this.bookable() || !controls(this.state, this.now()).submit) return;
       const code = this.state.code.trim();
       ++this.ocrEpoch;
       clearTimeout(this.timer);
@@ -644,7 +645,8 @@ SOFTWARE.
       });
     }
     async verify() {
-      if (!this.state.activity || !["submitting", "unknown", "verifying"].includes(this.state.phase)) return;
+      const id = this.state.activity?.id ?? this.targetId;
+      if (!id || !["submitting", "unknown", "verifying"].includes(this.state.phase)) return;
       if (this.state.phase === "verifying") return;
       const g = this.generation;
       this.set("verifying", "\u6B63\u5728\u67E5\u8BE2\u9884\u7EA6\u8BB0\u5F55");
@@ -654,10 +656,10 @@ SOFTWARE.
         if (attempt) await this.wait(attempt * 1e3);
         if (!this.valid(g)) return;
         try {
-          const booked = await this.stage("\u9884\u7EA6\u8BB0\u5F55\u6838\u9A8C", () => this.api.booked(this.state.activity.id));
+          const booked = await this.stage("\u9884\u7EA6\u8BB0\u5F55\u6838\u9A8C", () => this.api.booked(id));
           this.diagnostics.record("log", "\u6838\u9A8C\u7ED3\u679C", { attempt: attempt + 1, booked });
           if (booked) {
-            if (this.valid(g)) this.set("success", "\u9884\u7EA6\u6210\u529F\uFF0C\u5DF2\u6838\u9A8C\u9884\u7EA6\u8BB0\u5F55", { armed: false, remaining: void 0, activity: { ...this.state.activity, reserved: true } });
+            if (this.valid(g)) this.set("success", "\u9884\u7EA6\u6210\u529F\uFF0C\u5DF2\u6838\u9A8C\u9884\u7EA6\u8BB0\u5F55", { armed: false, remaining: void 0, verifiedId: id, activity: this.state.activity ? { ...this.state.activity, reserved: true } : void 0 });
             return;
           }
           detail = "\u6682\u672A\u67E5\u5230\u9884\u7EA6\u8BB0\u5F55";
@@ -706,9 +708,9 @@ SOFTWARE.
 :host{all:initial;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#18251e}
 *{box-sizing:border-box}dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}dialog::backdrop{background:#10251c80}
 #candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#labels{grid-column:1/-1;display:grid;gap:8px}#label-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;margin:6px 0}#annotate{justify-self:end}#pair-question{font-size:14px;color:#64776a;margin:0}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active,li.success{color:#24663b;font-weight:600}li.full{color:#a25f50}li.full .candidate-name{text-decoration:line-through;opacity:.8}li.failed{color:#a25f50}.candidate-status{margin-left:8px;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
-.challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}input{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}input:focus{outline:2px solid #287547;outline-offset:2px}
-p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}input{font-size:24px;letter-spacing:4px}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u5C06\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\u4E5F\u52A0\u5165\u5019\u9009\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u53D6\u6D88</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
+.challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}output{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}
+p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}output{font-size:24px;letter-spacing:4px}}
+</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u5C06\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\u4E5F\u52A0\u5165\u5019\u9009\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><div class="body"><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><output aria-label="OCR\u8BC6\u522B\u7ED3\u679C">\u2014</output></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u53D6\u6D88</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></div></dialog>`;
       this.panel = this.get("dialog");
       this.get("#online-first").addEventListener("click", () => actions.prefer("online"));
       this.get("#offline-first").addEventListener("click", () => actions.prefer("offline"));
@@ -719,13 +721,8 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         for (const select of this.root.querySelectorAll("#label-fields select")) if (select.value === "online" || select.value === "offline") labels[select.dataset.id] = select.value;
         actions.annotate(labels);
       });
-      this.get("form").addEventListener("submit", (e) => {
-        e.preventDefault();
-        actions.submit();
-      });
-      this.get("input").addEventListener("input", () => actions.edit(this.get("input").value));
       this.get("#lead").addEventListener("change", () => actions.configure(Number(this.get("#lead").value)));
-      for (const id of ["start", "refresh", "verify", "reload", "hide", "close", "login", "resume"]) this.get("#" + id).addEventListener("click", () => actions[id]());
+      for (const id of ["start", "verify", "reload", "hide", "close", "login", "resume"]) this.get("#" + id).addEventListener("click", () => actions[id]());
       this.panel.addEventListener("cancel", (e) => {
         e.preventDefault();
         actions.close();
@@ -801,13 +798,13 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       failure.textContent = !failure.hidden && state.lastFailure ? `${state.lastFailure.target}\uFF1A${state.lastFailure.message} \u2192 ${state.lastFailure.action}` : "";
       this.get("#status").textContent = state.message;
       this.get("#status").hidden = !state.message;
-      this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "input"].includes(state.phase);
+      this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "prepared"].includes(state.phase);
       this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? Date.now()) - Date.now() - (state.offset ?? 0)));
       const lead = this.get("#lead");
       lead.value = String(state.leadSeconds ?? 30);
       lead.disabled = state.phase !== "ready";
       this.get(".challenge").hidden = !state.image || ["success", "failed", "unknown"].includes(state.phase);
-      const image = this.get("img"), input = this.get("input");
+      const image = this.get("img");
       const changed = state.image !== this.lastImage;
       if (changed) {
         this.lastImage = state.image;
@@ -816,17 +813,11 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           this.show();
         } else image.removeAttribute("src");
       }
-      if (input.value !== (state.code ?? "")) input.value = state.code ?? "";
-      input.disabled = !allowed.edit;
-      if (changed && state.image && allowed.edit) input.focus();
+      this.get("output").textContent = state.code ?? "\u2014";
       this.host.dataset.ocr = state.ocrStatus;
       this.get("#start").hidden = state.phase !== "ready";
       this.get("#start").disabled = !allowed.start;
       this.get("#start").textContent = (state.activity?.startsAt ?? 0) > Date.now() + (state.offset ?? 0) ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
-      this.get("[type=submit]").hidden = !state.image || (state.remaining ?? 0) > 0 || !["waiting", "input", "recognizing"].includes(state.phase);
-      this.get("[type=submit]").disabled = !allowed.submit;
-      this.get("#refresh").hidden = !state.image || !["waiting", "input", "recognizing"].includes(state.phase);
-      this.get("#refresh").disabled = !allowed.refresh;
       this.get("#login").hidden = state.phase !== "login-required";
       this.get("#resume").hidden = state.phase !== "login-required";
       this.get("#verify").hidden = state.phase !== "unknown";
@@ -834,7 +825,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get("#hide").hidden = !state.armed || ["submitting", "verifying"].includes(state.phase);
       this.get("#close").hidden = choosing;
       this.get("#close").disabled = !allowed.close;
-      this.get("#preparation").hidden = !["ready", "waiting", "input", "recognizing"].includes(state.phase) || state.ocrStatus !== "failed";
+      this.get("#preparation").hidden = !["ready", "waiting", "prepared", "recognizing"].includes(state.phase) || state.ocrStatus !== "failed";
       this.get("#preparation").textContent = state.ocrMessage ?? "";
       if (["success", "failed", "unknown", "login-required"].includes(state.phase)) this.show();
     }
@@ -3729,7 +3720,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       } catch {
       }
     }
-    throw new Error("OCR \u8D44\u6E90\u52A0\u8F7D\u5931\u8D25\uFF0C\u8BF7\u4F7F\u7528\u624B\u52A8\u8F93\u5165\uFF0C\u7A0D\u540E\u91CD\u65B0\u6253\u5F00\u5F39\u7A97\u91CD\u8BD5");
+    throw new Error("OCR \u8D44\u6E90\u52A0\u8F7D\u5931\u8D25\uFF0C\u65E0\u6CD5\u5B8C\u6210\u81EA\u52A8\u9884\u7EA6");
   }
 
   // src/ocr.ts
@@ -3806,9 +3797,14 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
   // src/task-store.ts
   var KEY = "seu-lecture-pending-task";
   function saveTask(state, storage = sessionStorage) {
-    if (!state.activity || ["loading", "ready", "closed"].includes(state.phase)) return;
+    if (["loading", "ready", "closed"].includes(state.phase)) return;
     try {
-      if (["success", "failed"].includes(state.phase)) {
+      if (state.phase === "success") {
+        storage.removeItem(KEY);
+        return;
+      }
+      if (!state.activity) return;
+      if (state.phase === "failed") {
         storage.removeItem(KEY);
         return;
       }
@@ -3823,7 +3819,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
   function readTask(storage = sessionStorage) {
     try {
       const task = JSON.parse(storage.getItem(KEY) ?? "null");
-      if (task && typeof task.id === "string" && [10, 20, 30, 60].includes(task.leadSeconds) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && task.endsAt > Date.now()) {
+      if (task && typeof task.id === "string" && [10, 20, 30, 60].includes(task.leadSeconds) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && (task.verify || task.endsAt > Date.now())) {
         if (task.version === void 0 && task.ids === void 0) return task;
         if (task.version === 2 && Array.isArray(task.ids) && task.ids.length === 2 && task.ids.every((id) => typeof id === "string" && id.length > 0) && new Set(task.ids).size === 2 && Number.isInteger(task.index) && task.index >= 0 && task.index < 2 && task.ids[task.index] === task.id && ["online", "offline"].includes(task.preferred) && (task.labels === void 0 || task.labels && typeof task.labels === "object" && !Array.isArray(task.labels) && Object.entries(task.labels).every(([id, m]) => task.ids.includes(id) && ["online", "offline"].includes(String(m))))) return task;
       }
@@ -3882,8 +3878,9 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         }
         const task = new Reservation(api, (state) => {
           saveTask(state);
-          if (state.activity && state.phase !== "closed") mount.setReserved(state.activity.id, state.activity.reserved);
-          const label = state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : ["captcha-loading", "recognizing", "input", "submitting", "verifying"].includes(state.phase) ? "\u9884\u7EA6\u4E2D" : "";
+          if (state.verifiedId) mount.setReserved(state.verifiedId, true);
+          else if (state.activity && state.phase !== "closed") mount.setReserved(state.activity.id, state.activity.reserved);
+          const label = state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : ["captcha-loading", "recognizing", "prepared", "submitting", "verifying"].includes(state.phase) ? "\u9884\u7EA6\u4E2D" : "";
           mount.setActive(label ? state.activity?.id : void 0, label);
           current?.dialog.render(state);
         }, Date.now, ocr);
@@ -3891,13 +3888,6 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           choosePair: (include) => task.choosePair(include),
           prefer: (preferred) => task.prefer(preferred),
           annotate: (labels) => task.prefer(task.state.preferred ?? "online", labels),
-          submit: () => {
-            void task.submit();
-          },
-          edit: (code) => task.editCode(code),
-          refresh: () => {
-            void task.loadCaptcha();
-          },
           verify: () => {
             void task.verify();
           },
