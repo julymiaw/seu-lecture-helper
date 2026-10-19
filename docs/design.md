@@ -20,4 +20,4 @@ advanceCandidate 仅由 addReservation 的 business/full 分支调用；等待�
 
 sessionStorage 的 v2 记录保存两个 ID、索引、顺序与手动标注；提交阶段先保存 verify 屏障。恢复时固定目标和候选顺序，不重新自动匹配。旧记录没有候选数组时仍恢复为单目标，不能静默升级。验证码和答案不持久化。
 
-0.6.1 在主面板中增加 choosing 阶段，确认卡只展示另一场次名称和“是否加入？”，按钮为“不加入／加入”。确认前 start 不可用；应用场次标注也在该面板完成，不调用 window.confirm 或 window.prompt。
+0.6.1 在主面板中增加 choosing 阶段，确认卡只展示另一场次名称和“是否加入？”，按钮为“取消／加入”，集中在右侧。确认前 start 不可用；应用场次标注也在该面板完成，不调用 window.confirm 或 window.prompt。

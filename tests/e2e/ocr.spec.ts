@@ -64,7 +64,7 @@ async function setup(page:Page, options:{pair?:boolean;unlabelled?:boolean;unkno
   return {targets,events,writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures};
 }
 
-async function openHelper(page:Page,include=true){await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start:visible, #join:visible').first().waitFor({state:'visible'});if(await page.locator('#join').isVisible())await page.getByRole('button',{name:include?'加入':'不加入',exact:true}).click();}
+async function openHelper(page:Page,include=true){await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start:visible, #join:visible').first().waitFor({state:'visible'});if(await page.locator('#join').isVisible())await page.getByRole('button',{name:include?'加入':'取消',exact:true}).click();}
 
 test('installed bundle uses real WASM/model to recognize and submit, with safe diagnostics',async({page,context})=>{
   const logs:string[]=[];page.on('console',msg=>{logs.push(msg.text());});
