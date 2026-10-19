@@ -16,6 +16,7 @@ npm run check
 - `src/api.ts`：同源请求、数据解析与预约核验。
 - `src/reservation.ts`：提前取图、倒计时、答案修正、重试与提交。
 - `src/task-store.ts`：同一标签页的任务意图保存与恢复，不保存验证码。
+- `src/candidates.ts`：标题元数据解析、唯一场次配对与顺序。
 - `src/dialog.ts`：独立弹窗与输入事件。
 - `src/ocr.ts`、`ocr-assets.*`：本地推理、资源校验与缓存。
 - `src/diagnostics.ts`：Console 事件与阶段耗时。

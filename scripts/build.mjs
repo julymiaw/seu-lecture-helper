@@ -6,7 +6,7 @@ const header = `// ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
 // @version      ${version}
-// @description  提前准备验证码、人工修正、会话检查与登录恢复、到点提交与结果核验
+// @description  提前准备验证码、人工修正、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
 // @run-at       document-idle

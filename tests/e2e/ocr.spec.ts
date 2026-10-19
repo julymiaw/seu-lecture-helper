@@ -9,9 +9,12 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
+async function setup(page:Page, options:{pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
   const initialTime=Date.now();
-  let booked=false,writes=0,captchaCalls=0,assetCalls=0;
+  const annotations=['线上','线下'];
+  if(options.pair)page.on('dialog',dialog=>{if(dialog.type()==='confirm'){if(options.declinePair)void dialog.dismiss();else void dialog.accept();}else if(dialog.type()==='prompt'&&options.unlabelled)void dialog.accept(annotations.shift()!);});
+  let booked=false,bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,assetCalls=0;
+  const targets:string[]=[];const events:string[]=[];
   const codes:string[]=[];
   const failures:string[]=[];
   let image='';
@@ -34,15 +37,18 @@ async function setup(page:Page, options:{expireProbeOnce?:boolean;notOpenOnce?:b
     data.datas.xtdqsj=stamp(now); data.datas.hdlbList[0].YYKSSJ=stamp(initialTime+(options.future?3600000:-3600000)); data.datas.hdlbList[0].YYJSSJ=stamp(now+7200000); data.datas.xsxxList=[];
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
+    if(options.pair){const first=data.datas.hdlbList[0];first.JZMC=options.unlabelled?'【艺术】同一讲座':'【线上】【艺术】同一讲座';first.JZDD='腾讯会议';const second={...first,WID:'offline-fixture',JZMC:options.unlabelled?'【艺术】同一讲座':'【线下】【艺术】同一讲座',JZDD:'九龙湖报告厅'};data.datas.hdlbList=[first,second];data.datas.hdrsList=[{HD_WID:first.WID,YYRS:0},{HD_WID:second.WID,YYRS:0}];}
     if(name==='queryActivityList.do') result=data;
-    else if(name==='vcode.do') {captchaCalls++;if(options.expireProbeOnce&&captchaCalls===1)return route.fulfill({status:401,body:'unauthorized'});result={code:0,datas:image};}
+    else if(name==='vcode.do') {captchaCalls++;events.push('captcha');if(options.expireBackupOnce&&captchaCalls===2)return route.fulfill({status:401,body:'unauthorized'});if(options.expireProbeOnce&&captchaCalls===1)return route.fulfill({status:401,body:'unauthorized'});result={code:0,datas:image};}
     else if(name==='addReservation.do') {
-      writes++; codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
-      if(options.notOpenOnce&&writes===1) result={code:-1,datas:null,msg:'尚未开放预约'};
+      writes++;const target=new URLSearchParams(request.postData()!).get('wid')!;targets.push(target);events.push('submit:'+target);codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
+      if(options.pair&&target!== 'offline-fixture'&&options.unknownPrimary)return route.abort();
+      if(options.pair&&target!=='offline-fixture')result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
+      else if(options.notOpenOnce&&writes===1) result={code:-1,datas:null,msg:'尚未开放预约'};
       else if(full)result={code:-1,datas:null,msg:'当前活动预约人数已满，请重新选择'};
       else if(options.rejectCode&&(writes===1||options.rejectCode==='three'&&writes<=3)){if(options.fullOnRejection&&writes>=2)full=true;result={code:-1,datas:null,msg:'验证码错误，请重试'};}
-      else {booked=true;result={code:0,datas:1};}
-    } else if(name==='queryMyActivityList.do') result={code:0,datas:{wdhdList:booked?[{HD_WID:raw.datas.hdlbList[0].WID,YY_WID:'fixture-id',FBZT:'1'}]:[]}};
+      else {booked=true;bookedId=target;result={code:0,datas:1};}
+    } else if(name==='queryMyActivityList.do') result={code:0,datas:{wdhdList:booked?[{HD_WID:bookedId,YY_WID:'fixture-id',FBZT:'1'}]:[]}};
     else {failures.push(name!);return route.abort();}
     return route.fulfill({contentType:'application/json',body:JSON.stringify(result)});
   });
@@ -52,8 +58,12 @@ async function setup(page:Page, options:{expireProbeOnce?:boolean;notOpenOnce?:b
     const ctx=canvas.getContext('2d')!;ctx.fillStyle='white';ctx.fillRect(0,0,100,36);ctx.fillStyle='black';ctx.font='bold 26px serif';ctx.fillText('3253',8,27);return canvas.toDataURL('image/jpeg');
   });
 
+  if(options.pair)await page.locator('.activity-container').first().evaluate((card,unlabelled)=>{
+    card.querySelector('.activity-name')!.textContent=unlabelled?'【艺术】同一讲座':'【线上】【艺术】同一讲座';card.querySelectorAll('.activity-text')[2].querySelector('div')!.textContent='腾讯会议';Object.assign(card,{__vue__:{$props:{item:{WID:'9077433c420649399417b52eae7d5b50'}}}});
+    const other=card.cloneNode(true) as HTMLElement;other.querySelector('.activity-name')!.textContent=unlabelled?'【艺术】同一讲座':'【线下】【艺术】同一讲座';other.querySelectorAll('.activity-text')[2].querySelector('div')!.textContent='九龙湖报告厅';Object.assign(other,{__vue__:{$props:{item:{WID:'offline-fixture'}}}});card.after(other);
+  },options.unlabelled??false);
   await page.addScriptTag({content:script});
-  return {writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures};
+  return {targets,events,writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures};
 }
 
 test('installed bundle uses real WASM/model to recognize and submit, with safe diagnostics',async({page,context})=>{
@@ -125,4 +135,56 @@ test('expired session pauses, refresh returns to the saved task, and fresh captc
   await expect(page.getByRole('button',{name:'重新登录',exact:true})).toBeVisible();await page.reload();await page.addScriptTag({content:script});
   await expect(page.locator('#start')).toBeHidden();await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3540000);
   await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.writes()).toBe(1);
+});
+
+
+test('online-full fallback is serial, uses a fresh captcha, and retains the reason',async({page})=>{
+  const state=await setup(page,{pair:true});await page.getByRole('button',{name:'预约助手'}).first().click();
+  await expect(page.getByRole('button',{name:'线上优先',exact:true})).toHaveAttribute('aria-pressed','true');
+  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});
+  expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);expect(state.events).toEqual(['captcha','submit:'+raw.datas.hdlbList[0].WID,'captcha','submit:offline-fixture']);
+  await expect(page.locator('#failure')).toContainText('人数已满');expect(state.failures).toEqual([]);
+});
+test('one order control chooses offline first; successful first choice never submits the other',async({page})=>{
+  const state=await setup(page,{pair:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.getByRole('button',{name:'线下优先',exact:true}).click();
+  await expect(page.getByRole('button',{name:'标注线上／线下场次'})).toBeHidden();await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual(['offline-fixture']);
+});
+test('paired waiting layout fits mobile and preserves order across reload',async({page},testInfo)=>{
+  await page.clock.install();await setup(page,{pair:true,future:true});await page.setViewportSize({width:375,height:700});
+  await page.getByRole('button',{name:'预约助手'}).first().click();await page.getByRole('button',{name:'线下优先',exact:true}).click();await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
+  await page.reload();await page.addScriptTag({content:script});await expect(page.getByRole('button',{name:'线下优先',exact:true})).toHaveAttribute('aria-pressed','true');await expect(page.locator('#start')).toBeHidden();
+  await expect(page.locator('#seu-lecture-helper-dialog').locator('dialog')).toBeVisible();
+  expect(await page.locator('#seu-lecture-helper-dialog').locator('dialog').evaluate(el=>el.scrollWidth<=el.clientWidth&&el.scrollHeight<=el.clientHeight)).toBe(true);
+  await page.screenshot({path:testInfo.outputPath('candidate-mobile.png')});
+  await page.clock.fastForward(3571000);await expect(page.getByLabel('验证码',{exact:true})).toHaveValue('3253',{timeout:20000});
+  expect(await page.locator('#seu-lecture-helper-dialog').locator('dialog').evaluate(el=>el.scrollWidth<=el.clientWidth&&el.scrollHeight<=el.clientHeight)).toBe(true);
+  await page.screenshot({path:testInfo.outputPath('candidate-prepared-mobile.png')});
+  await page.setViewportSize({width:1280,height:800});await page.screenshot({path:testInfo.outputPath('candidate-prepared-desktop.png')});
+});
+test('unknown primary result never starts the fallback',async({page})=>{
+  const state=await setup(page,{pair:true,unknownPrimary:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('结果待确认',{timeout:20000});
+  expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);expect(state.captchaCalls()).toBe(1);
+});
+test('unclassified variants are blocked until the user supplies labels',async({page})=>{
+  const state=await setup(page,{pair:true,unlabelled:true});await page.getByRole('button',{name:'预约助手'}).first().click();await expect(page.locator('#start')).toBeDisabled();
+  await page.getByRole('button',{name:'标注线上／线下场次'}).click();await expect(page.locator('#start')).toBeEnabled();
+  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);
+});
+test('reload after backup captcha auth failure resumes the backup, not the exhausted primary',async({page})=>{
+  const state=await setup(page,{pair:true,expireBackupOnce:true});await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start').click();
+  await expect(page.getByRole('status')).toContainText('登录已失效',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);
+  await page.reload();await page.addScriptTag({content:script});await expect(page.getByRole('status')).toContainText('已核验',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID,'offline-fixture']);
+});
+
+test('declining counterpart confirmation keeps a single target and hides the order setting',async({page})=>{
+  const state=await setup(page,{pair:true,declinePair:true});await page.getByRole('button',{name:'预约助手'}).first().click();await expect(page.getByRole('group',{name:'候选顺序'})).toBeHidden();
+  await page.locator('#start').click();await expect(page.getByRole('status')).toContainText('人数已满',{timeout:20000});expect(state.targets).toEqual([raw.datas.hdlbList[0].WID]);
+});
+
+test('both variant buttons reopen the same waiting dialog without starting another task',async({page})=>{
+  const state=await setup(page,{pair:true,future:true});await page.locator('[data-activity-id="offline-fixture"]').click();await expect(page.getByRole('button',{name:'线上优先',exact:true})).toHaveAttribute('aria-pressed','true');await page.locator('#start').click();
+  await page.getByRole('button',{name:'收起',exact:true}).click();await page.locator('[data-activity-id="'+raw.datas.hdlbList[0].WID+'"]').click();await expect(page.locator('#start')).toBeHidden();expect(await page.locator('#seu-lecture-helper-dialog').count()).toBe(1);expect(state.captchaCalls()).toBe(0);
 });

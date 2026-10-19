@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.5.0
-// @description  提前准备验证码、人工修正、会话检查与登录恢复、到点提交与结果核验
+// @version      0.6.0
+// @description  提前准备验证码、人工修正、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
 // @run-at       document-idle
@@ -172,7 +172,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.5.0";
+  var version = "0.6.0";
 
   // src/diagnostics.ts
   var VERSION = version;
@@ -232,16 +232,44 @@ SOFTWARE.
     }
   };
 
+  // src/candidates.ts
+  function parseTitle(title) {
+    const first = /^\s*[【\[]([^】\]]+)[】\]]\s*(.*)$/s.exec(title);
+    if (!first) return { name: title.trim() };
+    const second = /^[【\[]([^】\]]+)[】\]]\s*(.*)$/s.exec(first[2]);
+    const mode2 = first[1].trim() === "\u7EBF\u4E0A" ? "online" : first[1].trim() === "\u7EBF\u4E0B" ? "offline" : void 0;
+    if (second) return { mode: mode2, category: second[1].trim(), name: second[2].trim() };
+    return mode2 ? { mode: mode2, name: first[2].trim() } : { category: first[1].trim(), name: first[2].trim() };
+  }
+  function mode(activity2, labels = {}) {
+    return labels[activity2.id] ?? parseTitle(activity2.title).mode;
+  }
+  var titleKey = (title) => {
+    const parsed = parseTitle(title);
+    return JSON.stringify([parsed.category ?? "", parsed.name.replace(/\s/g, "")]);
+  };
+  function findCandidates(activity2, available) {
+    if (!activity2.eventStart || !activity2.eventEnd) return [activity2];
+    const matches = available.filter((a) => a.id !== activity2.id && a.eventStart === activity2.eventStart && a.eventEnd === activity2.eventEnd && titleKey(a.title) === titleKey(activity2.title));
+    return matches.length === 1 ? [activity2, matches[0]] : [activity2];
+  }
+  function ordered(candidates, preferred, labels = {}) {
+    return [...candidates].sort((a, b) => Number(mode(b, labels) === preferred) - Number(mode(a, labels) === preferred));
+  }
+  function classified(candidates, labels = {}) {
+    return candidates.length === 1 || candidates.length === 2 && new Set(candidates.map((a) => mode(a, labels))).size === 2 && candidates.every((a) => mode(a, labels));
+  }
+
   // src/reservation.ts
   function fullCapacity(state) {
     const a = state.activity;
     return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);
   }
   function controls(state, now = Date.now()) {
-    const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now + (state.offset ?? 0) < a.endsAt && !fullCapacity(state));
+    const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now + (state.offset ?? 0) < a.endsAt && (!fullCapacity(state) || (state.candidates?.length ?? 0) > 1));
     const editable = active && ["waiting", "input", "recognizing"].includes(state.phase) && Boolean(state.image);
     return {
-      start: active && state.phase === "ready",
+      start: active && state.phase === "ready" && Boolean(classified(state.candidates ?? (a ? [a] : []), state.labels)),
       edit: editable,
       refresh: editable,
       submit: editable && now + (state.offset ?? 0) >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
@@ -265,6 +293,7 @@ SOFTWARE.
     submissions = 0;
     incomplete = false;
     targetId;
+    recovery;
     nextSessionCheck = 0;
     sessionChecking = false;
     expectedTickAt;
@@ -277,7 +306,7 @@ SOFTWARE.
     }
     stage(name, operation, stale = () => false) {
       const g = this.generation;
-      return this.diagnostics.measure(name, operation, { round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
+      return this.diagnostics.measure(name, operation, { activityId: this.state.activity?.id, candidateMode: this.state.activity ? mode(this.state.activity, this.state.labels) : void 0, priority: (this.state.candidateIndex ?? 0) + 1, round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
     }
     set(phase, message2, extra = {}) {
       const from = this.state.phase;
@@ -292,7 +321,7 @@ SOFTWARE.
         this.finish("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
         return false;
       }
-      if (a.cancelled || this.serverNow() >= a.endsAt || fullCapacity(this.state)) {
+      if (a.cancelled || this.serverNow() >= a.endsAt || fullCapacity(this.state) && (this.state.candidates?.length ?? 0) < 2) {
         this.stop(a.cancelled ? "\u6D3B\u52A8\u5DF2\u53D6\u6D88" : fullCapacity(this.state) ? "\u5F53\u524D\u6D3B\u52A8\u9884\u7EA6\u4EBA\u6570\u5DF2\u6EE1" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
         return false;
       }
@@ -319,6 +348,7 @@ SOFTWARE.
     }
     async open(id, recovery) {
       this.targetId = id;
+      this.recovery = recovery;
       const g = ++this.generation;
       this.diagnostics = new Diagnostics();
       this.round = 0;
@@ -326,7 +356,7 @@ SOFTWARE.
       this.incomplete = false;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
-      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: recovery?.leadSeconds ?? 30, verifyAfterLogin: recovery?.verify };
+      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", leadSeconds: recovery?.leadSeconds ?? 30, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online", labels: recovery?.labels };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id });
       try {
@@ -339,7 +369,28 @@ SOFTWARE.
           offset = detail.offset;
         }
         if (!this.valid(g)) return;
-        this.state = { ...this.state, activity: activity2, offset };
+        let candidates;
+        if (recovery?.ids) {
+          candidates = [];
+          for (const candidateId of recovery.ids) {
+            let item = data.activities.find((a) => a.id === candidateId);
+            if (!item) item = (await this.stage("\u5019\u9009\u8BE6\u60C5\u67E5\u8BE2", () => this.api.detail(candidateId))).activity;
+            if (!this.valid(g)) return;
+            candidates.push(item);
+          }
+        } else candidates = recovery ? [activity2] : ordered(findCandidates(activity2, data.activities), this.state.preferred, this.state.labels);
+        const index = recovery?.index ?? 0;
+        activity2 = candidates[index];
+        if (!activity2) throw new ApiError("\u6062\u590D\u7684\u5019\u9009\u573A\u6B21\u65E0\u6548", "format");
+        this.targetId = activity2.id;
+        this.state = { ...this.state, activity: activity2, offset, candidates, candidateIndex: index };
+        const bookedIndex = candidates.findIndex((a) => a.reserved);
+        if (bookedIndex >= 0) {
+          this.state = { ...this.state, activity: candidates[bookedIndex], candidateIndex: bookedIndex };
+          this.targetId = candidates[bookedIndex].id;
+          this.finish("success", "\u8BE5\u8BB2\u5EA7\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55\uFF0C\u4E0D\u518D\u9884\u7EA6\u53E6\u4E00\u573A\u6B21");
+          return;
+        }
         if (!this.bookable()) return;
         this.set("ready", "");
         void this.prepareOcr();
@@ -349,6 +400,37 @@ SOFTWARE.
           else this.stop(message(error));
         }
       }
+    }
+    single(id) {
+      if (this.state.phase !== "ready") return;
+      const activity2 = this.state.candidates?.find((a) => a.id === id);
+      if (!activity2) return;
+      this.targetId = id;
+      this.set("ready", "", { activity: activity2, candidates: [activity2], candidateIndex: 0 });
+      this.bookable();
+    }
+    prefer(preferred, labels = this.state.labels ?? {}) {
+      if (this.state.phase !== "ready") return;
+      const candidates = ordered(this.state.candidates ?? [], preferred, labels);
+      this.targetId = candidates[0]?.id;
+      this.set("ready", classified(candidates, labels) ? "" : "\u8BF7\u5C06\u4E24\u4E2A\u5019\u9009\u5206\u522B\u6807\u6CE8\u4E3A\u7EBF\u4E0A\u548C\u7EBF\u4E0B", { preferred, labels, candidates, candidateIndex: 0, activity: candidates[0] });
+    }
+    advanceCandidate() {
+      const index = (this.state.candidateIndex ?? 0) + 1, next = this.state.candidates?.[index];
+      if (!next) return false;
+      ++this.generation;
+      ++this.ocrEpoch;
+      clearTimeout(this.timer);
+      clearTimeout(this.retryTimer);
+      this.round = 0;
+      this.incomplete = false;
+      this.sessionChecking = false;
+      this.expectedTickAt = void 0;
+      this.targetId = next.id;
+      this.diagnostics.record("warn", "\u6EE1\u5458\u5207\u6362\u5019\u9009", { activityId: this.state.activity?.id, nextActivityId: next.id, priority: index + 1 });
+      this.set("waiting", "", { activity: next, candidateIndex: index, image: void 0, code: "", armed: true });
+      this.tick();
+      return true;
     }
     configure(leadSeconds) {
       if (this.state.phase === "ready" && [10, 20, 30, 60].includes(leadSeconds)) this.set("ready", "", { leadSeconds });
@@ -372,7 +454,8 @@ SOFTWARE.
     async resume() {
       if (this.state.phase !== "login-required" || !this.targetId) return;
       const activity2 = this.state.activity, id = this.targetId, lead = this.state.leadSeconds ?? 30, verify = this.state.verifyAfterLogin;
-      await this.open(id, { leadSeconds: lead, verify: Boolean(verify) });
+      const recovery = { leadSeconds: lead, verify: Boolean(verify), ids: this.state.candidates?.map((a) => a.id) ?? this.recovery?.ids, index: this.state.candidateIndex ?? this.recovery?.index, preferred: this.state.preferred, labels: this.state.labels };
+      await this.open(id, recovery);
       if (this.state.phase === "login-required") this.set("login-required", this.state.message, { activity: activity2, leadSeconds: lead, armed: true, verifyAfterLogin: verify });
       else if (verify) await this.restoreVerification();
       else if (this.state.phase === "ready") {
@@ -468,7 +551,7 @@ SOFTWARE.
           await this.ocrFailed();
           return;
         }
-        this.set("input", "", { code });
+        this.set("input", "", { code, ocrStatus: "ready" });
         if (this.serverNow() >= this.state.activity.startsAt) await this.submit();
       } catch {
         if (this.valid(g) && epoch === this.ocrEpoch) await this.ocrFailed();
@@ -498,13 +581,21 @@ SOFTWARE.
       clearTimeout(this.timer);
       const g = this.generation;
       ++this.submissions;
-      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { afterOpenMs: this.serverNow() - this.state.activity.startsAt });
+      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { activityId: this.state.activity.id, priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, afterOpenMs: this.serverNow() - this.state.activity.startsAt });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
       try {
         await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
         this.diagnostics.record("log", "\u670D\u52A1\u7AEF\u62A5\u544A\u9884\u7EA6\u6210\u529F", { responseCode: 0, responseData: 1 });
       } catch (error) {
         if (!this.valid(g)) return;
+        const reason = error instanceof ApiError && error.kind === "business" ? businessReason(error.message) : void 0;
+        let action = "\u6838\u9A8C\u5F53\u524D\u9884\u7EA6";
+        if (reason === "full") action = (this.state.candidateIndex ?? 0) + 1 < (this.state.candidates?.length ?? 1) ? "\u5207\u6362\u4E0B\u4E00\u5019\u9009" : "\u505C\u6B62\uFF1A\u6240\u6709\u5019\u9009\u5DF2\u6EE1";
+        else if (reason === "captcha-rejected" || reason === "not-open") action = "\u5F53\u524D\u573A\u6B21\u6362\u56FE\u91CD\u8BD5";
+        else if (error instanceof ApiError && error.kind === "session") action = "\u7B49\u5F85\u767B\u5F55\u6062\u590D";
+        else if (error instanceof ApiError && (error.kind === "rate" || error.kind === "business" && reason !== "already-booked")) action = "\u505C\u6B62";
+        this.set(this.state.phase, this.state.message, { lastFailure: { target: mode(this.state.activity, this.state.labels) === "online" ? "\u7EBF\u4E0A" : mode(this.state.activity, this.state.labels) === "offline" ? "\u7EBF\u4E0B" : this.state.activity.title, message: message(error), action } });
+        this.diagnostics.record("warn", "\u63D0\u4EA4\u5904\u7406\u51B3\u5B9A", { activityId: this.state.activity.id, candidateMode: mode(this.state.activity, this.state.labels), priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, ...errorInfo(error), action });
         if (error instanceof ApiError && error.kind === "session") {
           this.requireLogin();
           return;
@@ -514,7 +605,7 @@ SOFTWARE.
           return;
         }
         if (error instanceof ApiError && error.kind === "business") {
-          const reason = businessReason(error.message);
+          if (reason === "full" && this.advanceCandidate()) return;
           if (reason === "already-booked") {
             await this.verify();
             return;
@@ -594,16 +685,20 @@ SOFTWARE.
     root = this.host.attachShadow({ mode: "open" });
     panel;
     lastImage;
+    candidateSignature = "";
     constructor(actions) {
       this.host.id = "seu-lecture-helper-dialog";
       this.root.innerHTML = `<style>
 :host{all:initial;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#18251e}
 *{box-sizing:border-box}dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}dialog::backdrop{background:#10251c80}
-h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
+#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#annotate{grid-column:1/-1}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active{color:#24663b;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}.settings{font-size:13px;color:#64776a}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
 .challenge{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:18px;margin-top:18px;padding:14px;background:#f7f9f7;border-radius:12px}img{width:160px;max-width:100%;height:64px;object-fit:contain;justify-self:center}input{width:100%;font:28px system-ui;letter-spacing:6px;border:1px solid #b2c2b7;border-radius:8px;padding:8px;color:#18251e;background:white}input:focus{outline:2px solid #287547;outline-offset:2px}
-p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}#hide{margin-left:auto}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}input{font-size:24px;letter-spacing:4px}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
+p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}#hide{margin-left:auto}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}.challenge{gap:12px;padding:10px}input{font-size:24px;letter-spacing:4px}}
+</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><button type="button" id="annotate" hidden>\u6807\u6CE8\u7EBF\u4E0A\uFF0F\u7EBF\u4E0B\u573A\u6B21</button></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span><label class="settings">\u63D0\u524D <select id="lead" aria-label="\u63D0\u524D\u53D6\u56FE\u65F6\u95F4"><option value="10">10 \u79D2</option><option value="20">20 \u79D2</option><option value="30" selected>30 \u79D2</option><option value="60">60 \u79D2</option></select> \u53D6\u56FE</label></div><form><div class="challenge" hidden><img alt="\u9884\u7EA6\u9A8C\u8BC1\u7801"><input aria-label="\u9A8C\u8BC1\u7801" placeholder="\u9A8C\u8BC1\u7801" maxlength="4" inputmode="numeric" autocomplete="off" spellcheck="false"></div><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="submit" class="primary" hidden>\u63D0\u4EA4\u9884\u7EA6</button><button type="button" id="refresh" hidden>\u6362\u4E00\u5F20</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></form></dialog>`;
       this.panel = this.get("dialog");
+      this.get("#online-first").addEventListener("click", () => actions.prefer("online"));
+      this.get("#offline-first").addEventListener("click", () => actions.prefer("offline"));
+      this.get("#annotate").addEventListener("click", () => actions.annotate());
       this.get("form").addEventListener("submit", (e) => {
         e.preventDefault();
         actions.submit();
@@ -634,6 +729,30 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     render(state) {
       const allowed = controls(state);
       this.get("#title").textContent = state.activity?.title ?? "\u8BB2\u5EA7\u9884\u7EA6";
+      const candidates = state.candidates ?? [], paired = candidates.length === 2;
+      this.get("#candidates").hidden = !paired;
+      for (const [id, value] of [["online-first", "online"], ["offline-first", "offline"]]) {
+        const button = this.get("#" + id);
+        button.disabled = state.phase !== "ready";
+        button.setAttribute("aria-pressed", String((state.preferred ?? "online") === value));
+      }
+      this.get("#annotate").hidden = !paired || Boolean(classified(candidates, state.labels));
+      this.get("#annotate").disabled = state.phase !== "ready";
+      const signature = JSON.stringify([candidates, state.candidateIndex, state.labels]);
+      if (signature !== this.candidateSignature) {
+        this.candidateSignature = signature;
+        const list = this.get("ol");
+        list.replaceChildren(...candidates.map((item, i) => {
+          const row = document.createElement("li");
+          row.classList.toggle("active", i === (state.candidateIndex ?? 0));
+          const m = mode(item, state.labels);
+          row.textContent = `${i + 1}. ${m === "online" ? "\u7EBF\u4E0A" : m === "offline" ? "\u7EBF\u4E0B" : "\u672A\u6807\u6CE8"} \xB7 ${item.place || item.title}${i === (state.candidateIndex ?? 0) ? " \xB7 \u5F53\u524D" : ""}`;
+          return row;
+        }));
+      }
+      const failure = this.get("#failure");
+      failure.hidden = !state.lastFailure;
+      failure.textContent = state.lastFailure ? `${state.lastFailure.target}\uFF1A${state.lastFailure.message} \u2192 ${state.lastFailure.action}` : "";
       this.get("#status").textContent = state.message;
       this.get("#status").hidden = !state.message;
       this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "input"].includes(state.phase);
@@ -3646,14 +3765,21 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         storage.removeItem(KEY);
         return;
       }
-      if (state.armed || ["submitting", "verifying", "unknown"].includes(state.phase)) storage.setItem(KEY, JSON.stringify({ id: state.activity.id, leadSeconds: state.leadSeconds ?? 30, endsAt: state.activity.endsAt, verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase)) }));
+      if (state.armed || ["submitting", "verifying", "unknown"].includes(state.phase)) {
+        const task = { id: state.activity.id, leadSeconds: state.leadSeconds ?? 30, endsAt: state.activity.endsAt, verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase)) };
+        if ((state.candidates?.length ?? 0) > 1) Object.assign(task, { version: 2, ids: state.candidates.map((a) => a.id), index: state.candidateIndex ?? 0, preferred: state.preferred ?? "online", labels: state.labels });
+        storage.setItem(KEY, JSON.stringify(task));
+      }
     } catch {
     }
   }
   function readTask(storage = sessionStorage) {
     try {
       const task = JSON.parse(storage.getItem(KEY) ?? "null");
-      if (task && typeof task.id === "string" && [10, 20, 30, 60].includes(task.leadSeconds) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && task.endsAt > Date.now()) return task;
+      if (task && typeof task.id === "string" && [10, 20, 30, 60].includes(task.leadSeconds) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && task.endsAt > Date.now()) {
+        if (task.version === void 0 && task.ids === void 0) return task;
+        if (task.version === 2 && Array.isArray(task.ids) && task.ids.length === 2 && task.ids.every((id) => typeof id === "string" && id.length > 0) && new Set(task.ids).size === 2 && Number.isInteger(task.index) && task.index >= 0 && task.index < 2 && task.ids[task.index] === task.id && ["online", "offline"].includes(task.preferred) && (task.labels === void 0 || task.labels && typeof task.labels === "object" && !Array.isArray(task.labels) && Object.entries(task.labels).every(([id, m]) => task.ids.includes(id) && ["online", "offline"].includes(String(m))))) return task;
+      }
       storage.removeItem(KEY);
     } catch {
     }
@@ -3691,7 +3817,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     let current;
     let opening = false;
     async function open(id, recovery) {
-      if (current?.task.state.activity?.id === id) {
+      if (current?.task.state.candidates?.some((a) => a.id === id)) {
         current.dialog.show();
         return;
       }
@@ -3714,7 +3840,22 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
           mount.setActive(label ? state.activity?.id : void 0, label);
           current?.dialog.render(state);
         }, Date.now, ocr);
+        const annotate = () => {
+          const labels = { ...task.state.labels };
+          for (const item of task.state.candidates ?? []) {
+            const answer = window.prompt("\u8BF7\u6807\u6CE8\u573A\u6B21\uFF1A" + item.title + "\n\u5730\u70B9\uFF1A" + item.place + "\n\u8F93\u5165\u201C\u7EBF\u4E0A\u201D\u6216\u201C\u7EBF\u4E0B\u201D", mode(item, labels) === "online" ? "\u7EBF\u4E0A" : mode(item, labels) === "offline" ? "\u7EBF\u4E0B" : "");
+            if (answer === null) return;
+            if (answer.trim() !== "\u7EBF\u4E0A" && answer.trim() !== "\u7EBF\u4E0B") {
+              notice("\u8BF7\u8F93\u5165\u201C\u7EBF\u4E0A\u201D\u6216\u201C\u7EBF\u4E0B\u201D\uFF0C\u672A\u542F\u52A8\u9884\u7EA6");
+              return;
+            }
+            labels[item.id] = answer.trim() === "\u7EBF\u4E0A" ? "online" : "offline";
+          }
+          task.prefer(task.state.preferred ?? "online", labels);
+        };
         const dialog = new Dialog({
+          prefer: (preferred) => task.prefer(preferred),
+          annotate,
           submit: () => {
             void task.submit();
           },
@@ -3739,6 +3880,10 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         });
         current = { task, dialog, release };
         await task.open(id, recovery);
+        if (!recovery && task.state.phase === "ready" && task.state.candidates?.length === 2) {
+          const other = task.state.candidates.find((a) => a.id !== id);
+          if (!window.confirm("\u53D1\u73B0\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\uFF1A\n" + other.title + "\n" + other.place + "\n\u662F\u5426\u52A0\u5165\u5019\u9009\uFF1F\u6309\u6240\u9009\u987A\u5E8F\u9884\u7EA6\uFF0C\u53EA\u6709\u660E\u786E\u6EE1\u5458\u624D\u8F6C\u5411\u53E6\u4E00\u573A\u6B21\uFF0C\u6210\u529F\u540E\u7ED3\u675F\u3002")) task.single(id);
+        }
         if (recovery && task.state.phase !== "login-required") {
           if (recovery.verify) await task.restoreVerification();
           else if (task.state.phase === "ready") {

@@ -1,17 +1,21 @@
 import {ApiError, type Activity, type ReservationApi} from './api';
 import type {OcrEngine} from './ocr';
+import {findCandidates,ordered,classified,mode,type Mode,type Labels} from './candidates';
 import {Diagnostics, businessReason, errorInfo} from './diagnostics';
 export type Phase = 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'input' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
+export interface Recovery {leadSeconds:number;verify:boolean;ids?:string[];index?:number;preferred?:Mode;labels?:Labels}
 export interface State {
+  candidates?:Activity[]; candidateIndex?:number; preferred?:Mode; labels?:Labels;
+  lastFailure?:{target:string;message:string;action:string};
   phase: Phase; message: string; activity?: Activity; offset?: number; remaining?: number;
   image?: string; code?: string; leadSeconds?: number; armed?: boolean;
   ocrStatus?: 'loading' | 'ready' | 'failed'; ocrMessage?: string; verifyAfterLogin?:boolean;
 }
 export function fullCapacity(state: State) {const a=state.activity; return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);}
 export function controls(state: State, now=Date.now()) {
-  const a=state.activity, active=Boolean(a && !a.reserved && !a.cancelled && now+(state.offset??0)<a.endsAt && !fullCapacity(state));
+  const a=state.activity, active=Boolean(a && !a.reserved && !a.cancelled && now+(state.offset??0)<a.endsAt && (!fullCapacity(state) || (state.candidates?.length??0)>1));
   const editable=active && ['waiting','input','recognizing'].includes(state.phase) && Boolean(state.image);
-  return {start:active && state.phase==='ready', edit:editable, refresh:editable,
+  return {start:active && state.phase==='ready' && Boolean(classified(state.candidates??(a?[a]:[]),state.labels)), edit:editable, refresh:editable,
     submit:editable && now+(state.offset??0)>=a!.startsAt && /^\d{4}$/.test(state.code??''),
     close:!['submitting','verifying'].includes(state.phase)};
 }
@@ -26,6 +30,7 @@ export class Reservation {
   private submissions=0;
   private incomplete=false;
   private targetId?:string;
+  private recovery?:Recovery;
   private nextSessionCheck=0;
   private sessionChecking=false;
   private expectedTickAt?:number;
@@ -35,7 +40,7 @@ export class Reservation {
   private valid(g:number) {return g===this.generation && this.state.phase!=='closed';}
   private stage<T>(name:string,operation:()=>Promise<T>,stale=()=>false) {
     const g=this.generation;
-    return this.diagnostics.measure(name,operation,{round:this.round,submissions:this.submissions},()=>!this.valid(g)||stale());
+    return this.diagnostics.measure(name,operation,{activityId:this.state.activity?.id,candidateMode:this.state.activity?mode(this.state.activity,this.state.labels):undefined,priority:(this.state.candidateIndex??0)+1,round:this.round,submissions:this.submissions},()=>!this.valid(g)||stale());
   }
   private set(phase:Phase,message:string,extra:Partial<State>={}) {
     const from=this.state.phase;
@@ -46,7 +51,7 @@ export class Reservation {
     const a=this.state.activity;
     if(!a)return false;
     if(a.reserved){this.finish('success','该活动已有预约记录');return false;}
-    if(a.cancelled || this.serverNow()>=a.endsAt || fullCapacity(this.state)) {
+    if(a.cancelled || this.serverNow()>=a.endsAt || fullCapacity(this.state) && (this.state.candidates?.length??0)<2) {
       this.stop(a.cancelled?'活动已取消':fullCapacity(this.state)?'当前活动预约人数已满':'预约时间已结束');return false;
     }
     return true;
@@ -62,11 +67,11 @@ export class Reservation {
       if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'ready',ocrMessage:undefined});
     }catch(error){if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'failed',ocrMessage:'识别引擎不可用，请填写验证码'});}
   }
-  async open(id:string,recovery?:{leadSeconds:number;verify:boolean}) {
-    this.targetId=id;
+  async open(id:string,recovery?:Recovery) {
+    this.targetId=id;this.recovery=recovery;
     const g=++this.generation;
     this.diagnostics=new Diagnostics();this.round=0;this.submissions=0;this.incomplete=false;this.sessionChecking=false;this.expectedTickAt=undefined;
-    this.state={phase:'loading',message:'正在获取活动信息',leadSeconds:recovery?.leadSeconds??30,verifyAfterLogin:recovery?.verify};this.publish(this.state);
+    this.state={phase:'loading',message:'正在获取活动信息',leadSeconds:recovery?.leadSeconds??30,verifyAfterLogin:recovery?.verify,preferred:recovery?.preferred??'online',labels:recovery?.labels};this.publish(this.state);
     this.diagnostics.record('log','打开任务',{activityId:id});
     try {
       const data=await this.stage('活动查询',()=>this.api.list());
@@ -74,10 +79,34 @@ export class Reservation {
       let activity=data.activities.find(a=>a.id===id), offset=data.offset;
       if(!activity){const detail=await this.stage('活动详情查询',()=>this.api.detail(id));activity=detail.activity;offset=detail.offset;}
       if(!this.valid(g))return;
-      this.state={...this.state,activity,offset};
+      let candidates:Activity[];
+      if(recovery?.ids){candidates=[];for(const candidateId of recovery.ids){let item=data.activities.find(a=>a.id===candidateId);if(!item)item=(await this.stage('候选详情查询',()=>this.api.detail(candidateId))).activity;if(!this.valid(g))return;candidates.push(item);}}
+      else candidates=recovery?[activity]:ordered(findCandidates(activity,data.activities),this.state.preferred!,this.state.labels);
+      const index=recovery?.index??0;activity=candidates[index];
+      if(!activity)throw new ApiError('恢复的候选场次无效','format');
+      this.targetId=activity.id;this.state={...this.state,activity,offset,candidates,candidateIndex:index};
+      const bookedIndex=candidates.findIndex(a=>a.reserved);
+      if(bookedIndex>=0){this.state={...this.state,activity:candidates[bookedIndex],candidateIndex:bookedIndex};this.targetId=candidates[bookedIndex].id;this.finish('success','该讲座已有预约记录，不再预约另一场次');return;}
       if(!this.bookable())return;
       this.set('ready','');void this.prepareOcr();
     }catch(error){if(this.valid(g)){if(error instanceof ApiError && error.kind==='session')this.requireLogin();else this.stop(message(error));}}
+  }
+  single(id:string) {
+    if(this.state.phase!=='ready')return;
+    const activity=this.state.candidates?.find(a=>a.id===id);if(!activity)return;
+    this.targetId=id;this.set('ready','',{activity,candidates:[activity],candidateIndex:0});
+    this.bookable();
+  }
+  prefer(preferred:Mode,labels:Labels=this.state.labels??{}) {
+    if(this.state.phase!=='ready')return;
+    const candidates=ordered(this.state.candidates??[],preferred,labels);
+    this.targetId=candidates[0]?.id;this.set('ready',classified(candidates,labels)?'':'请将两个候选分别标注为线上和线下',{preferred,labels,candidates,candidateIndex:0,activity:candidates[0]});
+  }
+  private advanceCandidate() {
+    const index=(this.state.candidateIndex??0)+1,next=this.state.candidates?.[index];if(!next)return false;
+    ++this.generation;++this.ocrEpoch;clearTimeout(this.timer);clearTimeout(this.retryTimer);this.round=0;this.incomplete=false;this.sessionChecking=false;this.expectedTickAt=undefined;
+    this.targetId=next.id;this.diagnostics.record('warn','满员切换候选',{activityId:this.state.activity?.id,nextActivityId:next.id,priority:index+1});
+    this.set('waiting','',{activity:next,candidateIndex:index,image:undefined,code:'',armed:true});this.tick();return true;
   }
   configure(leadSeconds:number) {
     if(this.state.phase==='ready' && [10,20,30,60].includes(leadSeconds))this.set('ready','',{leadSeconds});
@@ -96,7 +125,8 @@ export class Reservation {
   async resume() {
     if(this.state.phase!=='login-required' || !this.targetId)return;
     const activity=this.state.activity,id=this.targetId,lead=this.state.leadSeconds??30,verify=this.state.verifyAfterLogin;
-    await this.open(id,{leadSeconds:lead,verify:Boolean(verify)});
+    const recovery:Recovery={leadSeconds:lead,verify:Boolean(verify),ids:this.state.candidates?.map(a=>a.id)??this.recovery?.ids,index:this.state.candidateIndex??this.recovery?.index,preferred:this.state.preferred,labels:this.state.labels};
+    await this.open(id,recovery);
     if((this.state as State).phase==='login-required')this.set('login-required',this.state.message,{activity,leadSeconds:lead,armed:true,verifyAfterLogin:verify});
     else if(verify)await this.restoreVerification();
     else if((this.state as State).phase==='ready'){this.configure(lead);this.start();}
@@ -165,7 +195,7 @@ export class Reservation {
       if(!this.valid(g)||epoch!==this.ocrEpoch)return;
       this.diagnostics.record('log','OCR输出检查',{length:code.length,valid:/^\d{4}$/.test(code)});
       if(!/^\d{4}$/.test(code)){await this.ocrFailed();return;}
-      this.set('input','',{code});
+      this.set('input','',{code,ocrStatus:'ready'});
       if(this.serverNow()>=this.state.activity!.startsAt)await this.submit();
     }catch{if(this.valid(g)&&epoch===this.ocrEpoch)await this.ocrFailed();}
   }
@@ -189,15 +219,23 @@ export class Reservation {
     const code=this.state.code!.trim();
     ++this.ocrEpoch;clearTimeout(this.timer);
     const g=this.generation;++this.submissions;
-    this.diagnostics.record('log','提交时机',{afterOpenMs:this.serverNow()-this.state.activity!.startsAt});
+    this.diagnostics.record('log','提交时机',{activityId:this.state.activity!.id,priority:(this.state.candidateIndex??0)+1,attempt:this.submissions,afterOpenMs:this.serverNow()-this.state.activity!.startsAt});
     this.set('submitting','正在提交预约');
     try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));this.diagnostics.record('log','服务端报告预约成功',{responseCode:0,responseData:1});}
     catch(error){
       if(!this.valid(g))return;
+      const reason=error instanceof ApiError && error.kind==='business'?businessReason(error.message):undefined;
+      let action='核验当前预约';
+      if(reason==='full')action=(this.state.candidateIndex??0)+1<(this.state.candidates?.length??1)?'切换下一候选':'停止：所有候选已满';
+      else if(reason==='captcha-rejected'||reason==='not-open')action='当前场次换图重试';
+      else if(error instanceof ApiError && error.kind==='session')action='等待登录恢复';
+      else if(error instanceof ApiError && (error.kind==='rate'||error.kind==='business' && reason!=='already-booked'))action='停止';
+      this.set(this.state.phase,this.state.message,{lastFailure:{target:mode(this.state.activity!,this.state.labels)==='online'?'线上':mode(this.state.activity!,this.state.labels)==='offline'?'线下':this.state.activity!.title,message:message(error),action}});
+      this.diagnostics.record('warn','提交处理决定',{activityId:this.state.activity!.id,candidateMode:mode(this.state.activity!,this.state.labels),priority:(this.state.candidateIndex??0)+1,attempt:this.submissions,...errorInfo(error),action});
       if(error instanceof ApiError && error.kind==='session'){this.requireLogin();return;}
       if(error instanceof ApiError && error.kind==='rate'){this.stop(message(error));return;}
       if(error instanceof ApiError && error.kind==='business'){
-        const reason=businessReason(error.message);
+        if(reason==='full' && this.advanceCandidate())return;
         if(reason==='already-booked'){await this.verify();return;}
         if(reason==='captcha-rejected' || reason==='not-open'){await this.retryCaptcha();return;}
         this.stop(error.message);return;

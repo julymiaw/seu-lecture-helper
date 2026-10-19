@@ -78,7 +78,7 @@ describe('cross-tab task lock', () => {
 
 
 describe('unified captcha dialog',()=>{
-  const actions=()=>({submit:vi.fn(),edit:vi.fn(),refresh:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),configure:vi.fn(),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()});
+  const actions=()=>({prefer:vi.fn(),annotate:vi.fn(),submit:vi.fn(),edit:vi.fn(),refresh:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),configure:vi.fn(),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()});
   it('shows OCR text and image together and sends human edits to task state',async()=>{
     const a=actions(),d=new Dialog(a),activity={...await sample(),reserved:false,startsAt:NOW+10000};
     d.render({phase:'input',activity,message:'',armed:true,image:'data:image/png;base64,AA==',code:'0733',remaining:10000});
@@ -104,4 +104,13 @@ describe('unified captcha dialog',()=>{
   it('renders untrusted titles as text and formats countdown',async()=>{
     const d=new Dialog(actions());d.render({phase:'ready',activity:{...await sample(),title:'<img onerror=bad>'},message:''});expect(d.root.querySelector('h2')!.textContent).toBe('<img onerror=bad>');expect(d.root.querySelector('h2 img')).toBeNull();expect(duration(1001)).toBe('00:00:02');d.destroy();
   });
+});
+it('candidate dialog adds only one order setting and locks it after start, while showing failure feedback',async()=>{
+  const a={prefer:vi.fn(),annotate:vi.fn(),submit:vi.fn(),edit:vi.fn(),refresh:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),configure:vi.fn(),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
+  const d=new Dialog(a),online={...await sample(),id:'on',title:'【线上】同一讲座'},offline={...online,id:'off',title:'【线下】同一讲座'};
+  const state={phase:'ready' as const,message:'',activity:online,candidates:[online,offline],preferred:'online' as const};d.render(state);
+  d.root.querySelector<HTMLButtonElement>('#offline-first')!.click();expect(a.prefer).toHaveBeenCalledWith('offline');expect(d.root.querySelector('#annotate')!.hasAttribute('hidden')).toBe(true);
+  d.render({...state,phase:'waiting',armed:true,lastFailure:{target:'线上',message:'人数已满',action:'切换下一候选'}});
+  expect(d.root.querySelector<HTMLButtonElement>('#offline-first')!.disabled).toBe(true);expect(d.root.querySelector('#failure')!.textContent).toContain('人数已满');
+  d.render({...state,candidates:[online]});expect(d.root.querySelector('#candidates')!.hasAttribute('hidden')).toBe(true);d.destroy();
 });
