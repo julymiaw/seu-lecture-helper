@@ -17,7 +17,7 @@ npm run check
 - `src/reservation.ts`：提前取图、倒计时、OCR 自动重试与提交。
 - `src/task-store.ts`：同一标签页的任务意图保存与恢复，不保存验证码。
 - `src/candidates.ts`：标题元数据解析、唯一场次配对与顺序。
-- `src/dialog.ts`：独立弹窗、只读识别结果与操作事件。
+- `src/dialog.ts`：独立弹窗、统一场次状态与操作事件。
 - `src/ocr.ts`、`ocr-assets.*`：本地推理、资源校验与缓存。
 - `src/diagnostics.ts`、`log-store.ts`：结构化事件、阶段耗时、本地 JSON 缓存与导出。
 - `src/mount.ts`、`lock.ts`、`main.ts`：按钮挂载、跨标签页互斥与初始化。

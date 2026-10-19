@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.1
+// @version      0.7.2
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -178,7 +178,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.1";
+  var version = "0.7.2";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -396,23 +396,23 @@ SOFTWARE.
     if (second) return { mode: mode2, category: second[1].trim(), name: second[2].trim() };
     return mode2 ? { mode: mode2, name: first[2].trim() } : { category: first[1].trim(), name: first[2].trim() };
   }
-  function mode(activity2, labels = {}) {
-    return labels[activity2.id] ?? parseTitle(activity2.title).mode;
+  function mode(activity2) {
+    return parseTitle(activity2.title).mode;
   }
   var titleKey = (title) => {
     const parsed = parseTitle(title);
     return JSON.stringify([parsed.category ?? "", parsed.name.replace(/\s/g, "")]);
   };
   function findCandidates(activity2, available) {
-    if (!activity2.eventStart || !activity2.eventEnd) return [activity2];
+    if (!mode(activity2) || !activity2.eventStart || !activity2.eventEnd) return [activity2];
     const matches = available.filter((a) => a.id !== activity2.id && a.eventStart === activity2.eventStart && a.eventEnd === activity2.eventEnd && titleKey(a.title) === titleKey(activity2.title));
-    return matches.length === 1 ? [activity2, matches[0]] : [activity2];
+    return matches.length === 1 && mode(matches[0]) && mode(matches[0]) !== mode(activity2) ? [activity2, matches[0]] : [activity2];
   }
-  function ordered(candidates, preferred, labels = {}) {
-    return [...candidates].sort((a, b) => Number(mode(b, labels) === preferred) - Number(mode(a, labels) === preferred));
+  function ordered(candidates, preferred) {
+    return [...candidates].sort((a, b) => Number(mode(b) === preferred) - Number(mode(a) === preferred));
   }
-  function classified(candidates, labels = {}) {
-    return candidates.length === 1 || candidates.length === 2 && new Set(candidates.map((a) => mode(a, labels))).size === 2 && candidates.every((a) => mode(a, labels));
+  function classified(candidates) {
+    return candidates.length === 1 || candidates.length === 2 && new Set(candidates.map((a) => mode(a))).size === 2 && candidates.every((a) => mode(a));
   }
 
   // src/reservation.ts
@@ -424,7 +424,7 @@ SOFTWARE.
   function controls(state, now = Date.now()) {
     const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now + (state.offset ?? 0) < a.endsAt && (!fullCapacity(state) || (state.candidates?.length ?? 0) > 1));
     return {
-      start: active && state.phase === "ready" && Boolean(classified(state.candidates ?? (a ? [a] : []), state.labels)),
+      start: active && state.phase === "ready" && Boolean(classified(state.candidates ?? (a ? [a] : []))),
       submit: active && state.phase === "prepared" && now + (state.offset ?? 0) >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
       close: !["submitting", "verifying"].includes(state.phase)
     };
@@ -463,7 +463,7 @@ SOFTWARE.
     }
     stage(name, operation, stale = () => false) {
       const g = this.generation;
-      return this.diagnostics.measure(name, operation, { activityId: this.state.activity?.id ?? this.targetId, candidateMode: this.state.activity ? mode(this.state.activity, this.state.labels) : void 0, priority: (this.state.candidateIndex ?? 0) + 1, round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
+      return this.diagnostics.measure(name, operation, { activityId: this.state.activity?.id ?? this.targetId, candidateMode: this.state.activity ? mode(this.state.activity) : void 0, priority: (this.state.candidateIndex ?? 0) + 1, round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
     }
     set(phase, message2, extra = {}) {
       const from = this.state.phase;
@@ -496,13 +496,13 @@ SOFTWARE.
       if (this.state.ocrStatus === "ready") return Promise.resolve(true);
       if (this.preparing) return this.preparing;
       const g = this.generation;
-      this.set(this.state.phase, this.state.message, { ocrStatus: "loading", ocrMessage: void 0 });
+      this.set(this.state.phase, this.state.message, { ocrStatus: "loading" });
       const pending = this.stage("OCR\u51C6\u5907\u4E0E\u9884\u70ED", () => this.ocr.prepare()).then(() => {
         if (!this.valid(g)) return false;
-        this.set(this.state.phase, this.state.message, { ocrStatus: "ready", ocrMessage: void 0 });
+        this.set(this.state.phase, this.state.message, { ocrStatus: "ready" });
         return true;
       }).catch(() => {
-        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "failed", ocrMessage: this.state.armed ? "OCR \u51C6\u5907\u5931\u8D25" : "OCR \u51C6\u5907\u5931\u8D25\uFF0C\u542F\u52A8\u65F6\u81EA\u52A8\u91CD\u8BD5" });
+        if (this.valid(g)) this.set(this.state.phase, this.state.message, { ocrStatus: "failed" });
         return false;
       }).finally(() => {
         if (this.preparing === pending) this.preparing = void 0;
@@ -524,7 +524,7 @@ SOFTWARE.
       this.preparing = void 0;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
-      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", runId: this.diagnostics.run, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online", labels: recovery?.labels };
+      this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", runId: this.diagnostics.run, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online" };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id, recovered: Boolean(recovery), verifyOnly: Boolean(recovery?.verify) });
       if (recovery?.verify) {
@@ -550,16 +550,26 @@ SOFTWARE.
             if (!this.valid(g)) return;
             candidates.push(item);
           }
-        } else candidates = recovery ? [activity2] : ordered(findCandidates(activity2, data.activities), this.state.preferred, this.state.labels);
-        const index = recovery?.index ?? 0;
+        } else candidates = recovery ? [activity2] : ordered(findCandidates(activity2, data.activities), this.state.preferred);
+        let index = recovery?.index ?? 0;
         activity2 = candidates[index];
         if (!activity2) throw new ApiError("\u6062\u590D\u7684\u5019\u9009\u573A\u6B21\u65E0\u6548", "format");
-        this.targetId = activity2.id;
-        this.state = { ...this.state, activity: activity2, offset, candidates, candidateIndex: index, fullIds: recovery?.ids?.slice(0, index) ?? [] };
         const bookedIndex = candidates.findIndex((a) => a.reserved);
         if (bookedIndex >= 0) {
-          this.state = { ...this.state, activity: candidates[bookedIndex], candidateIndex: bookedIndex };
-          this.targetId = candidates[bookedIndex].id;
+          index = bookedIndex;
+          activity2 = candidates[index];
+        } else {
+          const available = [...data.activities, ...candidates.filter((item) => !data.activities.some((a) => a.id === item.id))];
+          const matches = findCandidates(activity2, available);
+          if (!classified(candidates) || candidates.length === 2 && (matches.length !== 2 || !candidates.every((a) => matches.some((b) => a.id === b.id)))) {
+            this.diagnostics.record("warn", "\u5019\u9009\u914D\u5BF9\u5931\u6548\uFF0C\u4EC5\u6062\u590D\u5F53\u524D\u76EE\u6807", { activityId: activity2.id });
+            candidates = [activity2];
+            index = 0;
+          }
+        }
+        this.targetId = activity2.id;
+        this.state = { ...this.state, activity: activity2, offset, candidates, candidateIndex: index, fullIds: candidates.length > 1 ? recovery?.ids?.slice(0, index) ?? [] : [] };
+        if (bookedIndex >= 0) {
           this.finish("success", "\u8BE5\u8BB2\u5EA7\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55\uFF0C\u4E0D\u518D\u9884\u7EA6\u53E6\u4E00\u573A\u6B21");
           return;
         }
@@ -590,11 +600,11 @@ SOFTWARE.
       this.set("ready", "", { activity: activity2, candidates: [activity2], candidateIndex: 0 });
       this.bookable();
     }
-    prefer(preferred, labels = this.state.labels ?? {}) {
+    prefer(preferred) {
       if (this.state.phase !== "ready") return;
-      const candidates = ordered(this.state.candidates ?? [], preferred, labels);
+      const candidates = ordered(this.state.candidates ?? [], preferred);
       this.targetId = candidates[0]?.id;
-      this.set("ready", classified(candidates, labels) ? "" : "\u8BF7\u5C06\u4E24\u4E2A\u5019\u9009\u5206\u522B\u6807\u6CE8\u4E3A\u7EBF\u4E0A\u548C\u7EBF\u4E0B", { preferred, labels, candidates, candidateIndex: 0, activity: candidates[0] });
+      this.set("ready", "", { preferred, candidates, candidateIndex: 0, activity: candidates[0] });
     }
     advanceCandidate() {
       const index = (this.state.candidateIndex ?? 0) + 1, next = this.state.candidates?.[index];
@@ -636,7 +646,7 @@ SOFTWARE.
         return;
       }
       const snapshot = this.state, id = this.targetId;
-      const recovery = { runId: this.state.runId, verify: false, ids: this.state.candidates?.map((a) => a.id) ?? this.recovery?.ids, index: this.state.candidateIndex ?? this.recovery?.index, preferred: this.state.preferred, labels: this.state.labels };
+      const recovery = { runId: this.state.runId, verify: false, ids: this.state.candidates?.map((a) => a.id) ?? this.recovery?.ids, index: this.state.candidateIndex ?? this.recovery?.index, preferred: this.state.preferred };
       await this.open(id, recovery);
       if (this.state.phase === "login-required") this.set("login-required", this.state.message, { ...snapshot, runId: this.diagnostics.run, armed: Boolean(snapshot.armed) });
       else if (this.state.phase === "ready") this.start();
@@ -726,7 +736,7 @@ SOFTWARE.
         if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
       }
       if (!prepared) {
-        this.stop("OCR \u5F15\u64CE\u51C6\u5907\u5931\u8D25\uFF0C\u9884\u7EA6\u5DF2\u505C\u6B62\uFF1B\u8BE6\u89C1 Console");
+        this.stop("OCR \u5F15\u64CE\u51C6\u5907\u5931\u8D25\uFF0C\u9884\u7EA6\u5DF2\u505C\u6B62");
         return;
       }
       try {
@@ -769,8 +779,8 @@ SOFTWARE.
         else if (reason === "captcha-rejected" || reason === "not-open") action = "\u5F53\u524D\u573A\u6B21\u6362\u56FE\u91CD\u8BD5";
         else if (error instanceof ApiError && error.kind === "session") action = "\u7B49\u5F85\u767B\u5F55\u6062\u590D";
         else if (error instanceof ApiError && (error.kind === "rate" || error.kind === "business" && reason !== "already-booked")) action = "\u505C\u6B62";
-        this.set(this.state.phase, this.state.message, { fullIds: reason === "full" ? [.../* @__PURE__ */ new Set([...this.state.fullIds ?? [], this.state.activity.id])] : this.state.fullIds, lastFailure: { reason, target: mode(this.state.activity, this.state.labels) === "online" ? "\u7EBF\u4E0A" : mode(this.state.activity, this.state.labels) === "offline" ? "\u7EBF\u4E0B" : this.state.activity.title, message: message(error), action } });
-        this.diagnostics.record("warn", "\u63D0\u4EA4\u5904\u7406\u51B3\u5B9A", { activityId: this.state.activity.id, candidateMode: mode(this.state.activity, this.state.labels), priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, ...errorInfo(error), action });
+        if (reason === "full") this.set(this.state.phase, this.state.message, { fullIds: [.../* @__PURE__ */ new Set([...this.state.fullIds ?? [], this.state.activity.id])] });
+        this.diagnostics.record("warn", "\u63D0\u4EA4\u5904\u7406\u51B3\u5B9A", { activityId: this.state.activity.id, candidateMode: mode(this.state.activity), priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, ...errorInfo(error), action });
         if (error instanceof ApiError && error.kind === "session") {
           this.requireLogin();
           return;
@@ -860,36 +870,108 @@ SOFTWARE.
     const seconds = Math.max(0, Math.ceil(ms2 / 1e3));
     return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60].map((x) => String(x).padStart(2, "0")).join(":");
   }
+  function progress(state) {
+    if (state.phase === "ready" && state.ocrStatus === "failed") return "\u5F15\u64CE\u9884\u70ED\u5931\u8D25\uFF0C\u542F\u52A8\u65F6\u91CD\u8BD5";
+    if (state.phase === "waiting" && state.ocrStatus === "failed") return "\u5F15\u64CE\u9884\u70ED\u5931\u8D25\uFF0C\u53D6\u56FE\u65F6\u91CD\u8BD5";
+    switch (state.phase) {
+      case "ready":
+        return "\u5F85\u5F00\u59CB";
+      case "waiting":
+      case "prepared":
+        return "\u7B49\u5F85\u5F00\u653E";
+      case "captcha-loading":
+      case "recognizing":
+        return "\u51C6\u5907\u4E2D";
+      case "submitting":
+        return "\u63D0\u4EA4\u4E2D";
+      case "verifying":
+        return "\u6838\u9A8C\u4E2D";
+      case "success":
+        return "\u9884\u7EA6\u6210\u529F";
+      case "unknown":
+        return state.message || "\u7ED3\u679C\u5F85\u786E\u8BA4";
+      case "login-required":
+        return "\u767B\u5F55\u5DF2\u5931\u6548";
+      default:
+        return state.message;
+    }
+  }
   var Dialog = class {
     host = document.createElement("div");
     root = this.host.attachShadow({ mode: "open" });
     panel;
     candidateSignature = "";
-    labelsSignature = "";
     exporting = false;
     phase;
     constructor(actions) {
       this.host.id = "seu-lecture-helper-dialog";
-      this.root.innerHTML = `<style>
+      this.root.innerHTML = `
+<style>
 :host{all:initial;font-family:system-ui,"Microsoft YaHei",sans-serif;color:#18251e}
-*{box-sizing:border-box}dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}dialog::backdrop{background:#10251c80}
-#candidates{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px;margin-bottom:14px}#labels{grid-column:1/-1;display:grid;gap:8px}#label-fields label{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px;margin:6px 0}#annotate{justify-self:end}#pair-question{font-size:14px;color:#64776a;margin:0}.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px;margin:0}.priority button{flex:1;border:0;background:transparent}.priority button:disabled{opacity:1;color:#829087}.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}li{padding:3px 0;overflow-wrap:anywhere}li.active,li.success{color:#24663b;font-weight:600}li.full{color:#a25f50}li.full .candidate-name{text-decoration:line-through;opacity:.8}li.failed{color:#a25f50}.candidate-status{margin-left:8px;font-weight:600}#failure{background:#fff6e9;border-radius:8px;padding:8px 10px;color:#885722;overflow-wrap:anywhere}h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}.overview{display:flex;justify-content:center;align-items:center;background:#f0f7f2;border-radius:12px;padding:14px 16px}.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}select{font:inherit;color:#24663b;border:1px solid #ccd8cf;background:white;border-radius:7px;padding:6px}
-
-p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}button.primary{background:#287547;border-color:#287547;color:white}button:disabled{opacity:.5;cursor:default}[hidden]{display:none!important}@media(max-width:420px){#candidates{grid-template-columns:1fr;gap:5px}dialog{padding:18px}.clock{font-size:25px}.overview{gap:8px;padding:12px}}
-</style><dialog aria-labelledby="title"><h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2><p id="pair-question" hidden>\u662F\u5426\u5C06\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\u4E5F\u52A0\u5165\u5019\u9009\uFF1F</p><section id="candidates" hidden><div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F"><button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button><button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button></div><ol aria-label="\u5019\u9009\u573A\u6B21"></ol><section id="labels" hidden><div id="label-fields"></div><button type="button" id="annotate">\u5E94\u7528\u6807\u6CE8</button></section></section><div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span></div><div class="body"><p id="status" role="status" aria-live="polite"></p><p id="failure" hidden></p><p id="preparation" hidden></p><div class="actions"><button type="button" id="single" hidden>\u53D6\u6D88</button><button type="button" id="join" class="primary" hidden>\u52A0\u5165</button><button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button><button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button><button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button><button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button><button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button><button type="button" id="export">\u5BFC\u51FA\u65E5\u5FD7</button><button type="button" id="hide">\u6536\u8D77</button><button type="button" id="close">\u5173\u95ED</button></div></div></dialog>`;
+*{box-sizing:border-box}
+dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #dfe8e2;border-radius:18px;padding:24px;background:white;color:inherit;box-shadow:0 24px 80px #10251c30}
+dialog::backdrop{background:#10251c80}
+h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}
+p{margin:10px 0 0;font-size:13px;line-height:1.5}
+#pair-question{font-size:14px;color:#64776a;margin:0}
+#candidates{margin-bottom:14px}
+#candidates[data-paired=true]{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px}
+.priority{display:flex;gap:4px;background:#eef3ef;border-radius:10px;padding:4px}
+.priority button{flex:1;border:0;background:transparent}
+.priority button:disabled{opacity:1;color:#829087}
+.priority button[aria-pressed=true]{background:white;box-shadow:0 1px 5px #15372015;color:#287547;font-weight:600}
+ol{padding:0;margin:0;list-style:none;font-size:13px;color:#68786d}
+li{padding:3px 0;overflow-wrap:anywhere}
+li.active,li.success{color:#24663b;font-weight:600}
+li.full,li.failed{color:#a25f50}
+li.full .candidate-name{text-decoration:line-through;opacity:.8}
+.candidate-status{margin-left:8px;font-weight:600}
+.overview{display:flex;justify-content:center;align-items:center;background:#f0f7f2;border-radius:12px;padding:14px 16px}
+.clock{font-size:32px;font-weight:650;color:#287547;font-variant-numeric:tabular-nums}
+.actions{display:flex;justify-content:flex-end;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}
+#export{margin-right:auto}
+button{font:14px system-ui;min-height:38px;padding:7px 13px;border:1px solid #ccd8cf;border-radius:8px;background:white;color:#203e2d;cursor:pointer}
+button.primary{background:#287547;border-color:#287547;color:white}
+button:disabled{opacity:.5;cursor:default}
+[hidden]{display:none!important}
+@media(max-width:420px){
+  #candidates[data-paired=true]{grid-template-columns:1fr;gap:5px}
+  dialog{padding:18px}.clock{font-size:25px}.overview{padding:12px}
+}
+</style>
+<dialog aria-labelledby="title">
+  <h2 id="title">\u8BB2\u5EA7\u9884\u7EA6</h2>
+  <p id="pair-question" hidden>\u662F\u5426\u5C06\u540C\u4E00\u8BB2\u5EA7\u7684\u53E6\u4E00\u573A\u6B21\u4E5F\u52A0\u5165\u5019\u9009\uFF1F</p>
+  <section id="candidates" hidden>
+    <div class="priority" role="group" aria-label="\u5019\u9009\u987A\u5E8F">
+      <button type="button" id="online-first" aria-pressed="true">\u7EBF\u4E0A\u4F18\u5148</button>
+      <button type="button" id="offline-first" aria-pressed="false">\u7EBF\u4E0B\u4F18\u5148</button>
+    </div>
+    <ol aria-label="\u5019\u9009\u573A\u6B21" aria-live="polite"></ol>
+  </section>
+  <div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span></div>
+  <p id="status" role="status" aria-live="polite"></p>
+  <div class="actions">
+    <button type="button" id="export">\u5BFC\u51FA\u65E5\u5FD7</button>
+    <button type="button" id="single" hidden>\u53D6\u6D88</button>
+    <button type="button" id="join" class="primary" hidden>\u52A0\u5165</button>
+    <button type="button" id="start" class="primary">\u5F00\u59CB\u7B49\u5F85</button>
+    <button type="button" id="login" hidden>\u91CD\u65B0\u767B\u5F55</button>
+    <button type="button" id="resume" hidden>\u767B\u5F55\u540E\u6062\u590D</button>
+    <button type="button" id="verify" hidden>\u91CD\u65B0\u6838\u9A8C</button>
+    <button type="button" id="reload" hidden>\u5237\u65B0\u5B66\u6821\u9875\u9762</button>
+    <button type="button" id="hide">\u6536\u8D77</button>
+    <button type="button" id="close">\u5173\u95ED</button>
+  </div>
+</dialog>`;
       this.panel = this.get("dialog");
       this.get("#online-first").addEventListener("click", () => actions.prefer("online"));
       this.get("#offline-first").addEventListener("click", () => actions.prefer("offline"));
       this.get("#single").addEventListener("click", () => actions.choosePair(false));
       this.get("#join").addEventListener("click", () => actions.choosePair(true));
-      this.get("#annotate").addEventListener("click", () => {
-        const labels = {};
-        for (const select of this.root.querySelectorAll("#label-fields select")) if (select.value === "online" || select.value === "offline") labels[select.dataset.id] = select.value;
-        actions.annotate(labels);
-      });
       this.get("#export").addEventListener("click", async () => {
-        const button = this.get("#export");
         if (this.exporting) return;
+        const button = this.get("#export");
         this.exporting = true;
         button.disabled = true;
         try {
@@ -923,59 +1005,45 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
     render(state) {
       this.phase = state.phase;
       const allowed = controls(state);
-      const choosing = state.phase === "choosing", other = state.candidates?.find((a) => a.id !== state.requestedId);
+      const candidates = state.candidates ?? (state.activity ? [state.activity] : []);
+      const choosing = state.phase === "choosing", paired = candidates.length === 2;
+      const other = candidates.find((a) => a.id !== state.requestedId);
       this.get("#title").textContent = (choosing ? other?.title : state.activity?.title) ?? "\u8BB2\u5EA7\u9884\u7EA6";
       this.get("#pair-question").hidden = !choosing;
       this.get("#single").hidden = !choosing;
       this.get("#join").hidden = !choosing;
-      const candidates = state.candidates ?? [], paired = candidates.length === 2;
-      this.get("#candidates").hidden = !paired || choosing;
+      this.get("#candidates").hidden = choosing || candidates.length === 0;
+      this.get("#candidates").dataset.paired = String(paired);
+      this.get(".priority").hidden = !paired;
       for (const [id, value] of [["online-first", "online"], ["offline-first", "offline"]]) {
         const button = this.get("#" + id);
         button.disabled = state.phase !== "ready";
         button.setAttribute("aria-pressed", String((state.preferred ?? "online") === value));
       }
-      this.get("#labels").hidden = !paired || Boolean(classified(candidates, state.labels));
-      this.get("#annotate").disabled = state.phase !== "ready";
-      const labelsSignature = JSON.stringify([candidates.map((a) => a.id), state.labels]);
-      if (labelsSignature !== this.labelsSignature) {
-        this.labelsSignature = labelsSignature;
-        this.get("#label-fields").replaceChildren(...(paired && !classified(candidates, state.labels) ? candidates : []).map((item) => {
-          const label = document.createElement("label");
-          label.append(item.place || item.title);
-          const select = document.createElement("select");
-          select.dataset.id = item.id;
-          select.setAttribute("aria-label", "\u6807\u6CE8 " + (item.place || item.title));
-          for (const [value, text] of [["", "\u9009\u62E9\u573A\u6B21"], ["online", "\u7EBF\u4E0A"], ["offline", "\u7EBF\u4E0B"]]) select.add(new Option(text, value));
-          select.value = mode(item, state.labels) ?? "";
-          label.append(select);
-          return label;
-        }));
-      }
-      for (const select of this.root.querySelectorAll("#label-fields select")) select.disabled = state.phase !== "ready";
-      const signature = JSON.stringify([candidates, state.candidateIndex, state.labels, state.phase, state.fullIds]);
+      const signature = JSON.stringify([candidates, state.candidateIndex, state.phase, state.message, state.ocrStatus, state.fullIds]);
       if (signature !== this.candidateSignature) {
         this.candidateSignature = signature;
         this.get("ol").replaceChildren(...candidates.map((item, i) => {
-          const row = document.createElement("li"), current = i === (state.candidateIndex ?? 0), full = state.fullIds?.includes(item.id), success = current && state.phase === "success";
-          row.classList.toggle("full", Boolean(full));
+          const row = document.createElement("li"), current = i === (state.candidateIndex ?? 0);
+          const full = Boolean(state.fullIds?.includes(item.id) || current && state.phase === "failed" && state.message.includes("\u4EBA\u6570\u5DF2\u6EE1"));
+          const success = current && state.phase === "success";
+          row.dataset.current = String(current);
+          row.classList.toggle("full", full);
           row.classList.toggle("success", success);
           row.classList.toggle("failed", current && state.phase === "failed" && !full);
           row.classList.toggle("active", current && !full && !["success", "failed"].includes(state.phase));
-          const m = mode(item, state.labels), name = document.createElement("span"), status = document.createElement("span");
+          const name = document.createElement("span"), status = document.createElement("span"), m = mode(item);
           name.className = "candidate-name";
           status.className = "candidate-status";
-          name.textContent = `${i + 1}. ${m === "online" ? "\u7EBF\u4E0A" : m === "offline" ? "\u7EBF\u4E0B" : "\u672A\u6807\u6CE8"} \xB7 ${item.place || item.title}`;
-          status.textContent = full ? "\u5DF2\u6EE1" : success ? "\u9884\u7EA6\u6210\u529F" : !current ? "\u672A\u5C1D\u8BD5" : state.phase === "failed" ? "\u5931\u8D25" : state.phase === "unknown" ? "\u5F85\u6838\u9A8C" : state.phase === "login-required" ? "\u9700\u767B\u5F55" : state.phase === "verifying" ? "\u6838\u9A8C\u4E2D" : state.phase === "submitting" ? "\u63D0\u4EA4\u4E2D" : state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : state.armed ? "\u9884\u7EA6\u4E2D" : "\u5F85\u5F00\u59CB";
+          name.textContent = `${paired ? `${i + 1}. ` : ""}${m === "online" ? "\u7EBF\u4E0A \xB7 " : m === "offline" ? "\u7EBF\u4E0B \xB7 " : ""}${item.place || item.title}`;
+          status.textContent = full ? current && state.phase === "failed" ? "\u5DF2\u6EE1\uFF0C\u9884\u7EA6\u5931\u8D25" : "\u5DF2\u6EE1" : current ? progress(state) : "\u672A\u5C1D\u8BD5";
           row.append(name, status);
           return row;
         }));
       }
-      const failure = this.get("#failure");
-      failure.hidden = !state.lastFailure || state.phase === "success" || state.lastFailure.reason === "full";
-      failure.textContent = !failure.hidden && state.lastFailure ? `${state.lastFailure.target}\uFF1A${state.lastFailure.message} \u2192 ${state.lastFailure.action}` : "";
-      this.get("#status").textContent = state.message;
-      this.get("#status").hidden = !state.message;
+      const standalone = !choosing && candidates.length === 0;
+      this.get("#status").hidden = !standalone || !progress(state);
+      this.get("#status").textContent = standalone ? progress(state) : "";
       this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "prepared"].includes(state.phase);
       this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? Date.now()) - Date.now() - (state.offset ?? 0)));
       this.get("#export").hidden = choosing;
@@ -992,8 +1060,6 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       this.get("#hide").hidden = !state.armed || ["submitting", "verifying"].includes(state.phase);
       this.get("#close").hidden = choosing;
       this.get("#close").disabled = !allowed.close;
-      this.get("#preparation").hidden = !["ready", "waiting", "prepared", "recognizing"].includes(state.phase) || state.ocrStatus !== "failed";
-      this.get("#preparation").textContent = state.ocrMessage ?? "";
       if (["success", "failed", "unknown", "login-required"].includes(state.phase)) this.show();
     }
   };
@@ -3977,7 +4043,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       }
       if (state.armed || ["submitting", "verifying", "unknown"].includes(state.phase)) {
         const task = { id: state.activity.id, leadSeconds: CAPTURE_LEAD_MS / 1e3, runId: state.runId, endsAt: state.activity.endsAt, verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase)) };
-        if ((state.candidates?.length ?? 0) > 1) Object.assign(task, { version: 2, ids: state.candidates.map((a) => a.id), index: state.candidateIndex ?? 0, preferred: state.preferred ?? "online", labels: state.labels });
+        if ((state.candidates?.length ?? 0) > 1) Object.assign(task, { version: 2, ids: state.candidates.map((a) => a.id), index: state.candidateIndex ?? 0, preferred: state.preferred ?? "online" });
         storage.setItem(KEY, JSON.stringify(task));
       }
     } catch {
@@ -3988,7 +4054,7 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
       const task = JSON.parse(storage.getItem(KEY) ?? "null");
       if (task && typeof task.id === "string" && (task.leadSeconds === void 0 || [10, 20, 30, 60].includes(task.leadSeconds)) && (task.runId === void 0 || typeof task.runId === "string" && task.runId.length > 0 && task.runId.length <= 150) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && (task.verify || task.endsAt > Date.now())) {
         if (task.version === void 0 && task.ids === void 0) return task;
-        if (task.version === 2 && Array.isArray(task.ids) && task.ids.length === 2 && task.ids.every((id) => typeof id === "string" && id.length > 0) && new Set(task.ids).size === 2 && Number.isInteger(task.index) && task.index >= 0 && task.index < 2 && task.ids[task.index] === task.id && ["online", "offline"].includes(task.preferred) && (task.labels === void 0 || task.labels && typeof task.labels === "object" && !Array.isArray(task.labels) && Object.entries(task.labels).every(([id, m]) => task.ids.includes(id) && ["online", "offline"].includes(String(m))))) return task;
+        if (task.version === 2 && Array.isArray(task.ids) && task.ids.length === 2 && task.ids.every((id) => typeof id === "string" && id.length > 0) && new Set(task.ids).size === 2 && Number.isInteger(task.index) && task.index >= 0 && task.index < 2 && task.ids[task.index] === task.id && ["online", "offline"].includes(task.preferred)) return task;
       }
       storage.removeItem(KEY);
     } catch {
@@ -4054,7 +4120,6 @@ p{margin:10px 0 0;font-size:13px;line-height:1.5}#preparation{color:#9c5530}.act
         const dialog = new Dialog({
           choosePair: (include) => task.choosePair(include),
           prefer: (preferred) => task.prefer(preferred),
-          annotate: (labels) => task.prefer(task.state.preferred ?? "online", labels),
           verify: () => {
             void task.verify();
           },

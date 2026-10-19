@@ -78,7 +78,7 @@ describe('cross-tab task lock', () => {
 
 
 describe('OCR-only dialog',()=>{
-  const actions=()=>({choosePair:vi.fn(),prefer:vi.fn(),annotate:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()});
+  const actions=()=>({choosePair:vi.fn(),prefer:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()});
   it('keeps captcha processing invisible without an image, answer or manual controls',async()=>{
     const d=new Dialog(actions()),activity={...await sample(),reserved:false,startsAt:NOW+10000};
     d.render({phase:'prepared',activity,message:'',armed:true,image:'data:image/png;base64,AA==',code:'0733',remaining:10000});
@@ -98,17 +98,16 @@ describe('OCR-only dialog',()=>{
     const d=new Dialog(actions());d.render({phase:'ready',activity:{...await sample(),title:'<img onerror=bad>'},message:''});expect(d.root.querySelector('h2')!.textContent).toBe('<img onerror=bad>');expect(d.root.querySelector('h2 img')).toBeNull();expect(duration(1001)).toBe('00:00:02');d.destroy();
   });
 });
-it('candidate dialog adds only one order setting and locks it after start, while showing failure feedback',async()=>{
-  const a={choosePair:vi.fn(),prefer:vi.fn(),annotate:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
+it('uses the same candidate/status list for single and paired tasks with no duplicate feedback panels',async()=>{
+  const a={choosePair:vi.fn(),prefer:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
   const d=new Dialog(a),online={...await sample(),id:'on',title:'【线上】同一讲座'},offline={...online,id:'off',title:'【线下】同一讲座'};
   const state={phase:'ready' as const,message:'',activity:online,candidates:[online,offline],preferred:'online' as const};d.render(state);
-  d.root.querySelector<HTMLButtonElement>('#offline-first')!.click();expect(a.prefer).toHaveBeenCalledWith('offline');expect(d.root.querySelector('#labels')!.hasAttribute('hidden')).toBe(true);
-  d.render({...state,phase:'waiting',armed:true,lastFailure:{target:'线上',message:'人数已满',action:'切换下一候选'}});
-  expect(d.root.querySelector<HTMLButtonElement>('#offline-first')!.disabled).toBe(true);expect(d.root.querySelector('#failure')!.textContent).toContain('人数已满');
-  d.render({...state,candidates:[online]});expect(d.root.querySelector('#candidates')!.hasAttribute('hidden')).toBe(true);d.destroy();
+  d.root.querySelector<HTMLButtonElement>('#offline-first')!.click();expect(a.prefer).toHaveBeenCalledWith('offline');expect(d.root.querySelector('#labels')).toBeNull();expect(d.root.querySelector('#annotate')).toBeNull();
+  d.render({...state,phase:'waiting',armed:true});expect(d.root.querySelector<HTMLButtonElement>('#offline-first')!.disabled).toBe(true);expect(d.root.querySelector('#status')!.hasAttribute('hidden')).toBe(true);expect(d.root.querySelector('#failure')).toBeNull();expect(d.root.querySelector('#preparation')).toBeNull();
+  d.render({...state,candidates:[online],phase:'submitting',message:'正在提交预约'});expect(d.root.querySelector('#candidates')!.hasAttribute('hidden')).toBe(false);expect(d.root.querySelector('.priority')!.hasAttribute('hidden')).toBe(true);expect(d.root.querySelectorAll('li')).toHaveLength(1);expect(d.root.querySelector('.candidate-status')!.textContent).toBe('提交中');d.destroy();
 });
 it('pair confirmation uses only the counterpart title, question and two themed buttons',async()=>{
-  const a={choosePair:vi.fn(),prefer:vi.fn(),annotate:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
+  const a={choosePair:vi.fn(),prefer:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
   const d=new Dialog(a),online={...await sample(),id:'on',title:'【线上】【艺术】同一讲座'},offline={...online,id:'off',title:'【线下】【艺术】同一讲座'};
   d.render({phase:'choosing',message:'',activity:online,candidates:[online,offline],requestedId:'on'});
   expect(d.root.querySelector('#title')!.textContent).toBe(offline.title);expect(d.root.querySelector('#pair-question')!.textContent).toBe('是否将同一讲座的另一场次也加入候选？');
@@ -116,15 +115,30 @@ it('pair confirmation uses only the counterpart title, question and two themed b
   d.root.querySelector<HTMLButtonElement>('#join')!.click();expect(a.choosePair).toHaveBeenCalledWith(true);d.destroy();
 });
 it('updates each candidate outcome through verification and success, then removes stale failure and challenge actions',async()=>{
-  const a={choosePair:vi.fn(),prefer:vi.fn(),annotate:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
+  const a={choosePair:vi.fn(),prefer:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
   const d=new Dialog(a),online={...await sample(),id:'on',title:'【线上】同一讲座'},offline={...online,id:'off',title:'【线下】同一讲座'};
-  const state={phase:'verifying' as const,message:'正在核验',activity:offline,candidates:[online,offline],candidateIndex:1,fullIds:['on'],image:'image',code:'1234',lastFailure:{target:'线上',reason:'full',message:'人数已满，请重新选择',action:'切换下一候选'}};
-  d.render(state);expect(d.root.querySelectorAll('li')[0].textContent).toContain('已满');expect(d.root.querySelectorAll('li')[1].textContent).toContain('核验中');expect(d.root.querySelector('#failure')!.hasAttribute('hidden')).toBe(true);
+  const state={phase:'verifying' as const,message:'正在核验',activity:offline,candidates:[online,offline],candidateIndex:1,fullIds:['on'],image:'image',code:'1234'};
+  d.render(state);expect(d.root.querySelectorAll('li')[0].textContent).toContain('已满');expect(d.root.querySelectorAll('li')[1].textContent).toContain('核验中');expect(d.root.querySelector('#failure')).toBeNull();
   d.render({...state,phase:'success',message:'预约成功'});expect(d.root.querySelectorAll('li')[1].textContent).toContain('预约成功');expect(d.root.querySelectorAll('li')[1].classList.contains('success')).toBe(true);
-  expect(d.root.querySelector('#failure')!.textContent).toBe('');expect(d.root.querySelector('[type=submit]')).toBeNull();expect(d.root.querySelector('#refresh')).toBeNull();d.destroy();
+  expect(d.root.querySelector('#failure')).toBeNull();expect(d.root.querySelector('[type=submit]')).toBeNull();expect(d.root.querySelector('#refresh')).toBeNull();d.destroy();
 });
 it('keeps export busy across renders and restores its disabled state during a write',async()=>{
-  const pending=deferred<void>(),a={choosePair:vi.fn(),prefer:vi.fn(),annotate:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(()=>pending.promise),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
+  const pending=deferred<void>(),a={choosePair:vi.fn(),prefer:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(()=>pending.promise),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()};
   const d=new Dialog(a),activity=await sample(),button=d.root.querySelector<HTMLButtonElement>('#export')!;d.render({phase:'waiting',message:'',activity,armed:true});button.click();d.render({phase:'waiting',message:'',activity,armed:true});button.click();expect(a.exportLogs).toHaveBeenCalledTimes(1);expect(button.disabled).toBe(true);
   d.render({phase:'submitting',message:'',activity});pending.resolve();await Promise.resolve();expect(button.disabled).toBe(true);d.render({phase:'success',message:'',activity});expect(button.disabled).toBe(false);d.destroy();
+});
+
+it('places fatal errors and prewarm warnings on the same current row, with no duplicate global status',async()=>{
+  const actions={choosePair:vi.fn(),prefer:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()},d=new Dialog(actions),activity=await sample();
+  d.render({phase:'ready',activity,message:'',ocrStatus:'failed'});expect(d.root.querySelector('.candidate-status')!.textContent).toContain('预热失败');expect(d.root.querySelector('#status')!.hasAttribute('hidden')).toBe(true);
+  d.render({phase:'failed',activity,message:'请求受到限流，请稍后再试'});expect(d.root.querySelector('.candidate-status')!.textContent).toContain('限流');expect(d.root.querySelector('#status')!.hasAttribute('hidden')).toBe(true);
+  d.render({phase:'unknown',message:'恢复后核验',candidates:undefined,activity:undefined});expect(d.root.querySelector('#candidates')!.hasAttribute('hidden')).toBe(true);expect(d.root.querySelector('#status')!.textContent).toBe('恢复后核验');expect(d.root.querySelector('#status')!.hasAttribute('hidden')).toBe(false);d.destroy();
+});
+
+it.each([true,false])('preserves verification failure detail with metadata=%s',async metadata=>{
+  const actions={choosePair:vi.fn(),prefer:vi.fn(),verify:vi.fn(),close:vi.fn(),start:vi.fn(),exportLogs:vi.fn(async()=>{}),hide:vi.fn(),reload:vi.fn(),login:vi.fn(),resume:vi.fn()},d=new Dialog(actions);
+  const text='结果待确认：核验受到限流。请重新核验，不要直接重复提交。';
+  d.render({phase:'unknown',message:text,activity:metadata?await sample():undefined});
+  expect(d.root.querySelector(metadata?'.candidate-status':'#status')!.textContent).toBe(text);
+  expect(d.root.querySelector('#verify')!.hasAttribute('hidden')).toBe(false);d.destroy();
 });

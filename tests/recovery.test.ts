@@ -5,17 +5,17 @@ import {readTask,saveTask} from '../src/task-store';
 import {NOW,sample,mockApi} from './helpers';
 const engine=()=>({prepare:vi.fn(async()=>{}),recognize:vi.fn(async()=> '0733')});
 const flush=async()=>{for(let i=0;i<70;i++)await Promise.resolve();};
-it.each([0,1])('repeated authentication failures preserve candidate group, labels and priority at index %s',async index=>{
+it.each([0,1])('repeated authentication failures preserve candidate group and priority at index %s',async index=>{
   vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();
-  const online={...await sample(),id:'on',title:'同一讲座',reserved:false,startsAt:NOW+180000},offline={...online,id:'off',place:'报告厅'};
-  const intent={leadSeconds:30,verify:false,ids:['off','on'],index,preferred:'offline' as const,labels:{off:'offline' as const,on:'online' as const}};
+  const online={...await sample(),id:'on',title:'【线上】同一讲座',reserved:false,startsAt:NOW+180000},offline={...online,id:'off',title:'【线下】同一讲座',place:'报告厅'};
+  const intent={leadSeconds:30,verify:false,ids:['off','on'],index,preferred:'offline' as const};
   const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],offset:0})),captcha:vi.fn(async()=>{throw new ApiError('未登录','session',401);})});
   const task=new Reservation(api,s=>saveTask(s),Date.now,engine());await task.open(intent.ids[index],intent);task.start();await vi.advanceTimersByTimeAsync(60000);
   expect(task.state.phase).toBe('login-required');const before=readTask();expect(before).toMatchObject(intent);
   vi.mocked(api.list).mockRejectedValueOnce(new ApiError('未登录','session',401)).mockRejectedValueOnce(new ApiError('未登录','session',401));
   await task.resume();expect(readTask()).toEqual(before);await task.resume();expect(readTask()).toEqual(before);expect(task.state.candidates).toHaveLength(2);task.close();
   const saved=readTask()!,restored=new Reservation(api,vi.fn(),Date.now,engine());await restored.open(saved.id,saved);
-  expect(restored.state.candidateIndex).toBe(index);expect(restored.state.labels).toEqual(intent.labels);expect(restored.state.preferred).toBe('offline');restored.close();
+  expect(restored.state.candidateIndex).toBe(index);expect(restored.state.preferred).toBe('offline');restored.close();
 });
 it.each([false,true])('expired pending %s-group writes restore verification without metadata, OCR or resubmission',async group=>{
   vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();const online={...await sample(),id:'on',endsAt:NOW-1},offline={...online,id:'off'};

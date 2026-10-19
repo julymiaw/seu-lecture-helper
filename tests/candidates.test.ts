@@ -8,10 +8,12 @@ it('pairs exact lecture title and event times, regardless of row order',async()=
   expect(findCandidates(a,[a,{...b,eventEnd:'another time'}])).toEqual([a]);
   expect(findCandidates(a,[a,{...b,title:'【线下】另一个讲座'}])).toEqual([a]);
 });
-it('does not arbitrarily choose among duplicate variants; requires valid manual classification',async()=>{
+it('does not pair unclassified or duplicate variants',async()=>{
   const a={...await sample(),id:'a',title:'无场次标签'},b={...a,id:'b'};
-  expect(mode(a)).toBeUndefined();expect(classified([a,b])).toBe(false);expect(classified([a,b],{a:'online',b:'offline'})).toBe(true);
+  expect(mode(a)).toBeUndefined();expect(classified([a,b])).toBe(false);expect(findCandidates(a,[a,b])).toEqual([a]);
   expect(classified([{...a,title:'【线上】讲座'}, {...b,title:'【线上】讲座'}])).toBe(false);
+  const online={...a,title:'【线上】【艺术】同一讲座'};
+  expect(findCandidates(online,[online,{...online,id:'other'}])).toEqual([online]);
   expect(findCandidates(a,[a,b,{...b,id:'c'}])).toEqual([a]);
 });
 

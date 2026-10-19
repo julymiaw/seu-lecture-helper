@@ -1,21 +1,20 @@
 import {ApiError, type Activity, type ReservationApi} from './api';
 import type {OcrEngine} from './ocr';
-import {findCandidates,ordered,classified,mode,type Mode,type Labels} from './candidates';
+import {findCandidates,ordered,classified,mode,type Mode} from './candidates';
 import {Diagnostics, businessReason, errorInfo} from './diagnostics';
 export type Phase = 'choosing' | 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'prepared' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
 export const CAPTURE_LEAD_MS=30000;
-export interface Recovery {leadSeconds?:number;runId?:string;verify:boolean;ids?:string[];index?:number;preferred?:Mode;labels?:Labels}
+export interface Recovery {leadSeconds?:number;runId?:string;verify:boolean;ids?:string[];index?:number;preferred?:Mode}
 export interface State {
-  fullIds?:string[]; requestedId?:string; candidates?:Activity[]; candidateIndex?:number; preferred?:Mode; labels?:Labels;
-  lastFailure?:{target:string;message:string;action:string;reason?:string};
+  fullIds?:string[]; requestedId?:string; candidates?:Activity[]; candidateIndex?:number; preferred?:Mode;
   phase: Phase; message: string; runId?:string; verifiedId?:string; activity?: Activity; offset?: number; remaining?: number;
   image?: string; code?: string; armed?: boolean;
-  ocrStatus?: 'loading' | 'ready' | 'failed'; ocrMessage?: string; verifyAfterLogin?:boolean;
+  ocrStatus?: 'loading' | 'ready' | 'failed'; verifyAfterLogin?:boolean;
 }
 export function fullCapacity(state: State) {const a=state.activity; return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);}
 export function controls(state: State, now=Date.now()) {
   const a=state.activity, active=Boolean(a && !a.reserved && !a.cancelled && now+(state.offset??0)<a.endsAt && (!fullCapacity(state) || (state.candidates?.length??0)>1));
-  return {start:active && state.phase==='ready' && Boolean(classified(state.candidates??(a?[a]:[]),state.labels)),
+  return {start:active && state.phase==='ready' && Boolean(classified(state.candidates??(a?[a]:[]))),
     submit:active && state.phase==='prepared' && now+(state.offset??0)>=a!.startsAt && /^\d{4}$/.test(state.code??''),
     close:!['submitting','verifying'].includes(state.phase)};
 }
@@ -44,7 +43,7 @@ export class Reservation {
   private valid(g:number) {return g===this.generation && this.state.phase!=='closed';}
   private stage<T>(name:string,operation:()=>Promise<T>,stale=()=>false) {
     const g=this.generation;
-    return this.diagnostics.measure(name,operation,{activityId:this.state.activity?.id??this.targetId,candidateMode:this.state.activity?mode(this.state.activity,this.state.labels):undefined,priority:(this.state.candidateIndex??0)+1,round:this.round,submissions:this.submissions},()=>!this.valid(g)||stale());
+    return this.diagnostics.measure(name,operation,{activityId:this.state.activity?.id??this.targetId,candidateMode:this.state.activity?mode(this.state.activity):undefined,priority:(this.state.candidateIndex??0)+1,round:this.round,submissions:this.submissions},()=>!this.valid(g)||stale());
   }
   private set(phase:Phase,message:string,extra:Partial<State>={}) {
     const from=this.state.phase;
@@ -66,12 +65,12 @@ export class Reservation {
     if(this.state.ocrStatus==='ready')return Promise.resolve(true);
     if(this.preparing)return this.preparing;
     const g=this.generation;
-    this.set(this.state.phase,this.state.message,{ocrStatus:'loading',ocrMessage:undefined});
+    this.set(this.state.phase,this.state.message,{ocrStatus:'loading'});
     const pending=this.stage('OCR准备与预热',()=>this.ocr.prepare()).then(()=>{
       if(!this.valid(g))return false;
-      this.set(this.state.phase,this.state.message,{ocrStatus:'ready',ocrMessage:undefined});return true;
+      this.set(this.state.phase,this.state.message,{ocrStatus:'ready'});return true;
     }).catch(()=>{
-      if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'failed',ocrMessage:this.state.armed?'OCR 准备失败':'OCR 准备失败，启动时自动重试'});
+      if(this.valid(g))this.set(this.state.phase,this.state.message,{ocrStatus:'failed'});
       return false;
     }).finally(()=>{if(this.preparing===pending)this.preparing=undefined;});
     this.preparing=pending;return pending;
@@ -80,7 +79,7 @@ export class Reservation {
     this.targetId=id;this.recovery=recovery;
     const g=++this.generation;
     this.diagnostics=new Diagnostics(recovery?.runId);this.captchaSentAt=undefined;this.captchaReceivedAt=undefined;this.ocrFinishedAt=undefined;this.lastSessionCheckAt=undefined;this.round=0;this.submissions=0;this.preparing=undefined;this.sessionChecking=false;this.expectedTickAt=undefined;
-    this.state={phase:'loading',message:'正在获取活动信息',runId:this.diagnostics.run,verifyAfterLogin:recovery?.verify,preferred:recovery?.preferred??'online',labels:recovery?.labels};this.publish(this.state);
+    this.state={phase:'loading',message:'正在获取活动信息',runId:this.diagnostics.run,verifyAfterLogin:recovery?.verify,preferred:recovery?.preferred??'online'};this.publish(this.state);
     this.diagnostics.record('log','打开任务',{activityId:id,recovered:Boolean(recovery),verifyOnly:Boolean(recovery?.verify)});
     if(recovery?.verify){this.set('unknown','恢复后先核验之前的提交结果');return;}
     try {
@@ -91,12 +90,20 @@ export class Reservation {
       if(!this.valid(g))return;
       let candidates:Activity[];
       if(recovery?.ids){candidates=[];for(const candidateId of recovery.ids){let item=data.activities.find(a=>a.id===candidateId);if(!item)item=(await this.stage('候选详情查询',()=>this.api.detail(candidateId))).activity;if(!this.valid(g))return;candidates.push(item);}}
-      else candidates=recovery?[activity]:ordered(findCandidates(activity,data.activities),this.state.preferred!,this.state.labels);
-      const index=recovery?.index??0;activity=candidates[index];
+      else candidates=recovery?[activity]:ordered(findCandidates(activity,data.activities),this.state.preferred!);
+      let index=recovery?.index??0;activity=candidates[index];
       if(!activity)throw new ApiError('恢复的候选场次无效','format');
-      this.targetId=activity.id;this.state={...this.state,activity,offset,candidates,candidateIndex:index,fullIds:recovery?.ids?.slice(0,index)??[]};
       const bookedIndex=candidates.findIndex(a=>a.reserved);
-      if(bookedIndex>=0){this.state={...this.state,activity:candidates[bookedIndex],candidateIndex:bookedIndex};this.targetId=candidates[bookedIndex].id;this.finish('success','该讲座已有预约记录，不再预约另一场次');return;}
+      if(bookedIndex>=0){index=bookedIndex;activity=candidates[index];}
+      else {
+        const available=[...data.activities,...candidates.filter(item=>!data.activities.some(a=>a.id===item.id))];
+        const matches=findCandidates(activity,available);
+        if(!classified(candidates)||candidates.length===2&&(matches.length!==2||!candidates.every(a=>matches.some(b=>a.id===b.id)))){
+          this.diagnostics.record('warn','候选配对失效，仅恢复当前目标',{activityId:activity.id});candidates=[activity];index=0;
+        }
+      }
+      this.targetId=activity.id;this.state={...this.state,activity,offset,candidates,candidateIndex:index,fullIds:candidates.length>1?recovery?.ids?.slice(0,index)??[]:[]};
+      if(bookedIndex>=0){this.finish('success','该讲座已有预约记录，不再预约另一场次');return;}
       if(!this.bookable())return;
       this.set('ready','');void this.prepareOcr();
     }catch(error){if(this.valid(g)){if(error instanceof ApiError && error.kind==='session')this.requireLogin();else this.stop(message(error));}}
@@ -112,10 +119,10 @@ export class Reservation {
     this.targetId=id;this.set('ready','',{activity,candidates:[activity],candidateIndex:0});
     this.bookable();
   }
-  prefer(preferred:Mode,labels:Labels=this.state.labels??{}) {
+  prefer(preferred:Mode) {
     if(this.state.phase!=='ready')return;
-    const candidates=ordered(this.state.candidates??[],preferred,labels);
-    this.targetId=candidates[0]?.id;this.set('ready',classified(candidates,labels)?'':'请将两个候选分别标注为线上和线下',{preferred,labels,candidates,candidateIndex:0,activity:candidates[0]});
+    const candidates=ordered(this.state.candidates??[],preferred);
+    this.targetId=candidates[0]?.id;this.set('ready','',{preferred,candidates,candidateIndex:0,activity:candidates[0]});
   }
   private advanceCandidate() {
     const index=(this.state.candidateIndex??0)+1,next=this.state.candidates?.[index];if(!next)return false;
@@ -138,7 +145,7 @@ export class Reservation {
     if(this.state.phase!=='login-required' || !this.targetId)return;
     if(this.state.verifyAfterLogin){await this.restoreVerification();return;}
     const snapshot=this.state,id=this.targetId;
-    const recovery:Recovery={runId:this.state.runId,verify:false,ids:this.state.candidates?.map(a=>a.id)??this.recovery?.ids,index:this.state.candidateIndex??this.recovery?.index,preferred:this.state.preferred,labels:this.state.labels};
+    const recovery:Recovery={runId:this.state.runId,verify:false,ids:this.state.candidates?.map(a=>a.id)??this.recovery?.ids,index:this.state.candidateIndex??this.recovery?.index,preferred:this.state.preferred};
     await this.open(id,recovery);
     if((this.state as State).phase==='login-required')this.set('login-required',this.state.message,{...snapshot,runId:this.diagnostics.run,armed:Boolean(snapshot.armed)});
     else if((this.state as State).phase==='ready')this.start();
@@ -202,7 +209,7 @@ export class Reservation {
     let prepared=await this.prepareOcr();
     if(!this.valid(g)||epoch!==this.ocrEpoch||!this.bookable())return;
     if(!prepared && waitedForPrewarm){prepared=await this.prepareOcr();if(!this.valid(g)||epoch!==this.ocrEpoch||!this.bookable())return;}
-    if(!prepared){this.stop('OCR 引擎准备失败，预约已停止；详见 Console');return;}
+    if(!prepared){this.stop('OCR 引擎准备失败，预约已停止');return;}
     try {
       const code=(await this.stage('OCR识别',()=>this.ocr.recognize(image),()=>epoch!==this.ocrEpoch)).trim();
       if(!this.valid(g)||epoch!==this.ocrEpoch||!this.bookable())return;
@@ -234,8 +241,8 @@ export class Reservation {
       else if(reason==='captcha-rejected'||reason==='not-open')action='当前场次换图重试';
       else if(error instanceof ApiError && error.kind==='session')action='等待登录恢复';
       else if(error instanceof ApiError && (error.kind==='rate'||error.kind==='business' && reason!=='already-booked'))action='停止';
-      this.set(this.state.phase,this.state.message,{fullIds:reason==='full'?[...new Set([...(this.state.fullIds??[]),this.state.activity!.id])]:this.state.fullIds,lastFailure:{reason,target:mode(this.state.activity!,this.state.labels)==='online'?'线上':mode(this.state.activity!,this.state.labels)==='offline'?'线下':this.state.activity!.title,message:message(error),action}});
-      this.diagnostics.record('warn','提交处理决定',{activityId:this.state.activity!.id,candidateMode:mode(this.state.activity!,this.state.labels),priority:(this.state.candidateIndex??0)+1,attempt:this.submissions,...errorInfo(error),action});
+      if(reason==='full')this.set(this.state.phase,this.state.message,{fullIds:[...new Set([...(this.state.fullIds??[]),this.state.activity!.id])]});
+      this.diagnostics.record('warn','提交处理决定',{activityId:this.state.activity!.id,candidateMode:mode(this.state.activity!),priority:(this.state.candidateIndex??0)+1,attempt:this.submissions,...errorInfo(error),action});
       if(error instanceof ApiError && error.kind==='session'){this.requireLogin();return;}
       if(error instanceof ApiError && error.kind==='rate'){this.stop(message(error));return;}
       if(error instanceof ApiError && error.kind==='business'){

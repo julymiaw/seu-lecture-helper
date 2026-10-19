@@ -15,7 +15,7 @@ it('defaults to online and only obtains the second captcha after the full respon
   const{task,api}=await setup();const first=deferred<void>();vi.mocked(api.submit).mockImplementationOnce(()=>first.promise);
   task.start();await flush();expect(api.submit).toHaveBeenCalledWith('online','0733');expect(api.captcha).toHaveBeenCalledTimes(1);
   first.reject(new ApiError('当前活动预约人数已满，请重新选择','business'));await flush();
-  expect(vi.mocked(api.submit).mock.calls.map(a=>a[0])).toEqual(['online','offline']);expect(api.captcha).toHaveBeenCalledTimes(2);expect(task.state.phase).toBe('success');expect(task.state.lastFailure?.action).toBe('切换下一候选');
+  expect(vi.mocked(api.submit).mock.calls.map(a=>a[0])).toEqual(['online','offline']);expect(api.captcha).toHaveBeenCalledTimes(2);expect(task.state.phase).toBe('success');expect(vi.mocked(console.warn).mock.calls.some(call=>call[1]?.action==='切换下一候选')).toBe(true);
 });
 it('allows offline preference only before starting; success never touches the backup',async()=>{
   const{task,api}=await setup();task.prefer('offline');task.start();task.prefer('online');await flush();
@@ -27,7 +27,7 @@ it.each(['验证码错误','尚未开放预约'])('keeps %s on the same candidat
 });
 it('all-full stops once, without revisiting online or polling',async()=>{
   const{task,api}=await setup();vi.mocked(api.submit).mockRejectedValue(new ApiError('人数已满','business'));task.start();await flush();await vi.advanceTimersByTimeAsync(60000);
-  expect(vi.mocked(api.submit).mock.calls.map(a=>a[0])).toEqual(['online','offline']);expect(task.state.phase).toBe('failed');expect(task.state.lastFailure?.action).toContain('所有候选已满');
+  expect(vi.mocked(api.submit).mock.calls.map(a=>a[0])).toEqual(['online','offline']);expect(task.state.phase).toBe('failed');expect(vi.mocked(console.warn).mock.calls.some(call=>call[1]?.action==='停止：所有候选已满')).toBe(true);
 });
 it('unknown writes verify the current candidate and never advance on timeout or false records',async()=>{
   const{task,api}=await setup();vi.mocked(api.submit).mockRejectedValue(new ApiError('网络请求超时','network'));vi.mocked(api.booked).mockResolvedValue(false);
@@ -37,9 +37,8 @@ it.each(['rate','session','format'] as const)('%s does not advance to a fallback
   const{task,api}=await setup();vi.mocked(api.submit).mockRejectedValue(new ApiError('拒绝',kind));task.start();await flush();
   expect(api.submit).toHaveBeenCalledTimes(1);expect(task.state.activity?.id).toBe('online');
 });
-it('requires manual labels when classification fails, then obeys the same priority setting',async()=>{
-  const{task,api}=await setup(undefined,true);expect(controls(task.state).start).toBe(false);task.start();expect(api.captcha).not.toHaveBeenCalled();
-  task.prefer('online',{online:'online',offline:'offline'});task.start();await flush();expect(api.submit).toHaveBeenCalledWith('online','0733');
+it('uses only the clicked target when mode classification fails, without manual labeling',async()=>{
+  const{task,api}=await setup(undefined,true);expect(task.state.candidates).toHaveLength(1);expect(controls(task.state).start).toBe(true);task.start();await flush();expect(api.submit).toHaveBeenCalledExactlyOnceWith('offline','0733');
 });
 it('restores the second candidate and verifies only, with no new captcha or write',async()=>{
   const{task,api}=await setup({ids:['online','offline'],index:1,preferred:'online',leadSeconds:20,verify:true});await task.restoreVerification();
@@ -64,4 +63,22 @@ it('inline candidate choice blocks starting until a decision, without starting e
   const{task,api}=await setup();task.requestPairChoice('offline');expect(task.state.phase).toBe('choosing');expect(controls(task.state).start).toBe(false);task.start();expect(api.captcha).not.toHaveBeenCalled();
   task.choosePair(true);expect(task.state.phase).toBe('ready');expect(task.state.candidates).toHaveLength(2);expect(api.submit).not.toHaveBeenCalled();
   task.requestPairChoice('offline');task.choosePair(false);expect(task.state.activity?.id).toBe('offline');expect(task.state.candidates).toHaveLength(1);
+});
+
+it('legacy unclassified groups recover only the current target, without using saved labels',async()=>{
+  const{task,api}=await setup({ids:['online','offline'],index:1,preferred:'online',verify:false},true);expect(task.state.candidates?.map(a=>a.id)).toEqual(['offline']);expect(task.state.candidateIndex).toBe(0);task.start();await flush();expect(api.submit).toHaveBeenCalledExactlyOnceWith('offline','0733');
+});
+it('a booked alternate in a legacy unclassified group still prevents any new write',async()=>{
+  const{task,api,online,offline}=await setup(undefined,true);vi.mocked(api.list).mockResolvedValue({activities:[{...online,reserved:true},offline],offset:0});await task.open('offline',{ids:['online','offline'],index:1,preferred:'online',verify:false});task.start();await flush();expect(task.state.phase).toBe('success');expect(task.state.activity?.id).toBe('online');expect(api.submit).not.toHaveBeenCalled();
+});
+
+it.each(['rescheduled','renamed','ambiguous'] as const)('restores only the current target when the saved pair becomes %s',async change=>{
+  const {task,api,online,offline}=await setup();
+  const alternate=change==='rescheduled'?{...offline,eventStart:'2099-01-01'}:change==='renamed'?{...offline,title:'【线下】不同讲座'}:offline;
+  const activities=[online,alternate,...(change==='ambiguous'?[{...offline,id:'third'}]:[])];
+  vi.mocked(api.list).mockResolvedValue({activities,offset:0});
+  await task.open('online',{ids:['online','offline'],index:0,preferred:'online',verify:false});
+  expect(task.state.candidates?.map(a=>a.id)).toEqual(['online']);
+  vi.mocked(api.submit).mockRejectedValue(new ApiError('人数已满','business'));
+  task.start();await flush();expect(api.submit).toHaveBeenCalledExactlyOnceWith('online','0733');expect(task.state.phase).toBe('failed');
 });

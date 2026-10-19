@@ -39,7 +39,7 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
         mount.setActive(label ? state.activity?.id : undefined, label);
         current?.dialog.render(state);
       }, Date.now, ocr);
-      const dialog = new Dialog({choosePair:include=>task.choosePair(include),prefer:preferred=>task.prefer(preferred),annotate:labels=>task.prefer(task.state.preferred??'online',labels),verify: () => {void task.verify();}, resume: () => {void task.resume();}, login: () => {location.reload();}, close: () => close(), reload: () => location.reload(),
+      const dialog = new Dialog({choosePair:include=>task.choosePair(include),prefer:preferred=>task.prefer(preferred),verify: () => {void task.verify();}, resume: () => {void task.resume();}, login: () => {location.reload();}, close: () => close(), reload: () => location.reload(),
         exportLogs: async()=>{try{const warning=await downloadLogs();if(warning)notice(warning);}catch(error){notice('日志导出失败：'+message(error));}},start: () => task.start(), hide: () => dialog.hide()});
       current = {task, dialog, release};
       await task.open(id,recovery);
