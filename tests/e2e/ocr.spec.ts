@@ -4,6 +4,7 @@ const assets:Record<string,{path:string}>=JSON.parse(readFileSync('src/ocr-asset
 const raw=JSON.parse(readFileSync('tests/fixtures/activities.json','utf8'));
 const html=readFileSync('tests/fixtures/list.html','utf8');
 const script=readFileSync('dist/seu-lecture-helper.user.js','utf8');
+const {version}=JSON.parse(readFileSync('package.json','utf8'));
 const ORIGIN='https://lecture.test';
 const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replace('T',' ');
 const fixtureStyle=`<style>
@@ -77,6 +78,7 @@ const progress=(page:Page)=>page.locator('#candidates li[data-current="true"] .c
 async function openHelper(page:Page,include=true){await page.getByRole('button',{name:'预约助手'}).first().click();await page.locator('#start:visible, #join:visible').first().waitFor({state:'visible'});if(await page.locator('#join').isVisible())await page.getByRole('button',{name:include?'加入':'取消',exact:true}).click();}
 
 test('installed bundle uses real WASM/model to recognize and submit, with safe diagnostics',async({page,context})=>{
+  expect(script.match(/^\/\/ @version\s+(.+)$/m)?.[1]).toBe(version);
   const logs:string[]=[];page.on('console',msg=>{logs.push(msg.text());});
   await context.addCookies([{name:'cdn-test-cookie',value:'must-not-be-sent',url:'https://cdn.jsdelivr.net'}]);
   const state=await setup(page);await openHelper(page);await page.locator('#start').click();
@@ -267,12 +269,11 @@ test('single candidate has the same row-based progress and no duplicate status o
   await expect(progress(page)).toHaveText('等待开放');await expect(page.locator('#status')).toBeHidden();await expect(page.locator('#failure, #preparation, #labels, select')).toHaveCount(0);await page.clock.fastForward(30000);await expect(progress(page)).toHaveText('预约成功');expect(state.writes()).toBe(1);
   const aligned=await page.locator('.actions').evaluate(el=>{const a=el.getBoundingClientRect(),exportButton=el.querySelector('#export')!.getBoundingClientRect(),close=el.querySelector('#close')!.getBoundingClientRect();return Math.abs(exportButton.left-a.left)<1&&Math.abs(close.right-a.right)<1;});expect(aligned).toBe(true);
 });
-test('final detail calibration precedes captcha preparation and changing the system clock cannot trigger an early submit',async({page})=>{
+test('final detail calibration precedes captcha preparation and critical-stage requests remain serial',async({page})=>{
   await page.clock.install();const state=await setup(page,{future:true});await openHelper(page);await page.locator('#start').click();
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
   await page.clock.fastForward(3560500);await expect.poll(state.detailCalls).toBe(1);expect(state.captchaCalls()).toBe(0);
   await page.clock.fastForward(10000);await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','prepared',{timeout:20000});
-  const localTime=await page.evaluate(()=>Date.now());await page.clock.setSystemTime(localTime+3600000);
   await page.clock.fastForward(1000);expect(state.writes()).toBe(0);expect(state.detailCalls()).toBe(1);
   await page.clock.fastForward(30000);await expect(progress(page)).toContainText('预约成功');
   expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);expect(state.detailCalls()).toBe(1);expect(state.failures).toEqual([]);

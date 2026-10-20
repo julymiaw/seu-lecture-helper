@@ -46,7 +46,7 @@ export interface ReservationApi {
   booked(id: string): Promise<boolean>;
 }
 export class Api implements ReservationApi {
-  constructor(private transport: typeof fetch = (input, init) => fetch(input, init), private now = Date.now, private timeout = 15000, private monotonic = () => performance.now()) {}
+  constructor(private transport: typeof fetch = (input, init) => fetch(input, init), private now = Date.now, private timeout = 15000) {}
   private async request(name: string, data?: Record<string, string>): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
@@ -79,11 +79,11 @@ export class Api implements ReservationApi {
     } finally { clearTimeout(timer); }
   }
   private clockSample(value:unknown,startedAt:number):ClockSample {
-    const receivedAt=this.monotonic(),rttMs=receivedAt-startedAt,serverTime=schoolTime(value);
-    return {serverTime,receivedAt,rttMs,offset:serverTime+rttMs/2-this.now()};
+    const receivedAt=this.now(),rttMs=receivedAt-startedAt,serverTime=schoolTime(value);
+    return {serverTime,receivedAt,rttMs,offset:serverTime-(startedAt+receivedAt)/2};
   }
   async list() {
-    const before = this.monotonic();
+    const before = this.now();
     const data = await this.request('queryActivityList.do', {}) as Row;
     const clock = this.clockSample(data.xtdqsj,before);
     const counts = new Map(rows(data.hdrsList ?? []).map(x => [String(x.HD_WID), x.YYRS]));
@@ -92,7 +92,7 @@ export class Api implements ReservationApi {
     return {clock, activities: [...unique.values()].map(row => activity({...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID))}))};
   }
   async detail(id: string) {
-    const before = this.monotonic();
+    const before = this.now();
     const data = await this.request('getActivityDetail.do', {wid: id}) as Row;
     const clock = this.clockSample(data?.xtdqsj,before);
     if (!data?.hdxq) throw new ApiError('未找到活动详情', 'format');

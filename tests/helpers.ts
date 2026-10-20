@@ -8,7 +8,7 @@ export const NOW = Date.parse('2026-10-12T08:00:00Z');
 export const response = (data: unknown, status = 200) => new Response(JSON.stringify(data), {status});
 export const envelope = (datas: unknown) => ({code: 0, datas, msg: '', debugException: null});
 export async function sample(): Promise<Activity> {
-  return (await new Api(vi.fn(async () => response(raw)), () => NOW,15000,()=>0).list()).activities[0];
+  return (await new Api(vi.fn(async () => response(raw)), () => NOW).list()).activities[0];
 }
 export async function mockApi(overrides: Partial<ReservationApi> = {}) {
   const a = {...await sample(), reserved: false, startsAt: NOW - 1000};
@@ -28,4 +28,4 @@ export function trackedStorage() {
   };
 }
 
-export const clockSample=(offset=0)=>({serverTime:Date.now()+offset,receivedAt:performance.now(),rttMs:0,offset});
+export const clockSample=(offset=0)=>({serverTime:Date.now()+offset,receivedAt:Date.now(),rttMs:0,offset});

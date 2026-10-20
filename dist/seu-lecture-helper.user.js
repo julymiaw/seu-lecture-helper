@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.4
+// @version      0.7.5
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -99,11 +99,10 @@ SOFTWARE.
     return value;
   }
   var Api = class {
-    constructor(transport = (input, init) => fetch(input, init), now = Date.now, timeout = 15e3, monotonic = () => performance.now()) {
+    constructor(transport = (input, init) => fetch(input, init), now = Date.now, timeout = 15e3) {
       this.transport = transport;
       this.now = now;
       this.timeout = timeout;
-      this.monotonic = monotonic;
     }
     async request(name, data) {
       const controller = new AbortController();
@@ -147,11 +146,11 @@ SOFTWARE.
       }
     }
     clockSample(value, startedAt) {
-      const receivedAt = this.monotonic(), rttMs = receivedAt - startedAt, serverTime = schoolTime(value);
-      return { serverTime, receivedAt, rttMs, offset: serverTime + rttMs / 2 - this.now() };
+      const receivedAt = this.now(), rttMs = receivedAt - startedAt, serverTime = schoolTime(value);
+      return { serverTime, receivedAt, rttMs, offset: serverTime - (startedAt + receivedAt) / 2 };
     }
     async list() {
-      const before = this.monotonic();
+      const before = this.now();
       const data = await this.request("queryActivityList.do", {});
       const clock = this.clockSample(data.xtdqsj, before);
       const counts = new Map(rows(data.hdrsList ?? []).map((x) => [String(x.HD_WID), x.YYRS]));
@@ -160,7 +159,7 @@ SOFTWARE.
       return { clock, activities: [...unique.values()].map((row) => activity({ ...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID)) })) };
     }
     async detail(id) {
-      const before = this.monotonic();
+      const before = this.now();
       const data = await this.request("getActivityDetail.do", { wid: id });
       const clock = this.clockSample(data?.xtdqsj, before);
       if (!data?.hdxq) throw new ApiError("\u672A\u627E\u5230\u6D3B\u52A8\u8BE6\u60C5", "format");
@@ -184,7 +183,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.4";
+  var version = "0.7.5";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -395,8 +394,8 @@ SOFTWARE.
 
   // src/clock.ts
   var MAX_CLOCK_RTT_MS = 2e3;
-  function serverNow(sample, monotonic = performance.now()) {
-    return sample ? sample.serverTime + sample.rttMs / 2 + monotonic - sample.receivedAt : Date.now();
+  function serverNow(sample, now = Date.now()) {
+    return now + (sample?.offset ?? 0);
   }
 
   // src/candidates.ts
@@ -442,12 +441,11 @@ SOFTWARE.
     };
   }
   var Reservation = class {
-    constructor(api, publish, now = Date.now, ocr, monotonic = () => performance.now()) {
+    constructor(api, publish, now = Date.now, ocr) {
       this.api = api;
       this.publish = publish;
       this.now = now;
       this.ocr = ocr;
-      this.monotonic = monotonic;
     }
     state = { phase: "closed", message: "" };
     generation = 0;
@@ -469,16 +467,13 @@ SOFTWARE.
     captchaReceivedAt;
     ocrFinishedAt;
     lastSessionCheckAt;
-    observe() {
-      return { wall: this.now(), mono: this.monotonic() };
-    }
     serverNow() {
-      return serverNow(this.state.clock, this.monotonic());
+      return serverNow(this.state.clock, this.now());
     }
     calibrate(sample, source) {
       const previous = this.state.clock;
       const accepted = !previous || sample.rttMs <= MAX_CLOCK_RTT_MS;
-      const correction = previous ? serverNow(sample, this.monotonic()) - this.serverNow() : void 0;
+      const correction = previous ? sample.offset - previous.offset : void 0;
       if (accepted) this.state = { ...this.state, clock: sample };
       this.diagnostics.record(accepted && sample.rttMs <= MAX_CLOCK_RTT_MS ? "log" : "warn", "\u670D\u52A1\u5668\u6821\u65F6", {
         source,
@@ -661,7 +656,7 @@ SOFTWARE.
     }
     start() {
       if (!controls(this.state, this.serverNow()).start || !this.bookable()) return;
-      this.nextSessionCheck = this.monotonic() + 6e4;
+      this.nextSessionCheck = this.now() + 6e4;
       this.set("waiting", "", { armed: true });
       this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: CAPTURE_LEAD_MS / 1e3, serverOffsetMs: this.state.clock?.offset, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
       this.tick();
@@ -697,7 +692,7 @@ SOFTWARE.
       try {
         const result = await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.detail(this.state.activity.id));
         if (!this.valid(g) || !this.state.armed) return;
-        this.lastSessionCheckAt = this.observe();
+        this.lastSessionCheckAt = this.now();
         if (this.round === 0) this.calibrate(result.clock, final ? "\u5F00\u653E\u524D\u6700\u7EC8\u6821\u65F6" : "\u5468\u671F\u4FDD\u6D3B");
         else this.diagnostics.record("warn", "\u6821\u65F6\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", requestRttMs: result.clock.rttMs });
       } catch (error) {
@@ -715,15 +710,15 @@ SOFTWARE.
     }
     tick = () => {
       clearTimeout(this.timer);
-      if (this.expectedTickAt !== void 0 && this.monotonic() - this.expectedTickAt > 1e3) this.diagnostics.record("warn", "\u8BA1\u65F6\u56DE\u8C03\u5EF6\u8FDF", { delayMs: this.monotonic() - this.expectedTickAt, visibility: document.visibilityState });
+      if (this.expectedTickAt !== void 0 && this.now() - this.expectedTickAt > 1e3) this.diagnostics.record("warn", "\u8BA1\u65F6\u56DE\u8C03\u5EF6\u8FDF", { delayMs: this.now() - this.expectedTickAt, visibility: document.visibilityState });
       if (!this.state.armed || !this.bookable()) return;
       const remaining = this.state.activity.startsAt - this.serverNow();
       this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
       if (this.round === 0 && !this.sessionChecking && remaining > CAPTURE_LEAD_MS) {
         const final = remaining <= 4e4 && !this.finalClockChecked;
-        if (final || remaining > 4e4 && this.monotonic() >= this.nextSessionCheck) {
+        if (final || remaining > 4e4 && this.now() >= this.nextSessionCheck) {
           if (final) this.finalClockChecked = true;
-          this.nextSessionCheck = this.monotonic() + 6e4;
+          this.nextSessionCheck = this.now() + 6e4;
           this.sessionChecking = true;
           void this.checkSession(final);
         }
@@ -734,7 +729,7 @@ SOFTWARE.
         return;
       }
       const delay = Math.min(250, remaining);
-      this.expectedTickAt = this.monotonic() + delay;
+      this.expectedTickAt = this.now() + delay;
       this.timer = setTimeout(this.tick, delay);
     };
     async loadCaptcha() {
@@ -745,13 +740,13 @@ SOFTWARE.
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          this.captchaSentAt = this.observe();
+          this.captchaSentAt = this.now();
           this.captchaReceivedAt = void 0;
           this.ocrFinishedAt = void 0;
           const image = await this.stage("\u9A8C\u8BC1\u7801\u83B7\u53D6", () => this.api.captcha());
           if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
-          this.captchaReceivedAt = this.observe();
-          this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u5230\u8FBE", { round: this.round, requestAttempt: attempt + 1, captchaSentAt: this.captchaSentAt?.wall, captchaReceivedAt: this.captchaReceivedAt?.wall });
+          this.captchaReceivedAt = this.now();
+          this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u5230\u8FBE", { round: this.round, requestAttempt: attempt + 1, captchaSentAt: this.captchaSentAt, captchaReceivedAt: this.captchaReceivedAt });
           this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801");
           void this.recognize(image, epoch);
           return;
@@ -786,8 +781,8 @@ SOFTWARE.
       try {
         const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch)).trim();
         if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
-        this.ocrFinishedAt = this.observe();
-        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, length: code.length, valid: /^\d{4}$/.test(code), ocrFinishedAt: this.ocrFinishedAt?.wall });
+        this.ocrFinishedAt = this.now();
+        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, length: code.length, valid: /^\d{4}$/.test(code), ocrFinishedAt: this.ocrFinishedAt });
         if (!/^\d{4}$/.test(code)) {
           await this.retryCaptcha();
           return;
@@ -815,16 +810,16 @@ SOFTWARE.
         priority: (this.state.candidateIndex ?? 0) + 1,
         attempt: this.submissions,
         afterOpenMs: this.serverNow() - this.state.activity.startsAt,
-        captchaSentAt: this.captchaSentAt?.wall,
-        captchaReceivedAt: this.captchaReceivedAt?.wall,
-        captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.monotonic() - this.captchaReceivedAt.mono,
-        captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.monotonic() - this.captchaSentAt.mono,
-        ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.monotonic() - this.ocrFinishedAt.mono,
-        lastSessionCheckAt: this.lastSessionCheckAt?.wall,
-        clockSampleAgeMs: this.state.clock ? this.monotonic() - this.state.clock.receivedAt : void 0,
+        captchaSentAt: this.captchaSentAt,
+        captchaReceivedAt: this.captchaReceivedAt,
+        captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.now() - this.captchaReceivedAt,
+        captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.now() - this.captchaSentAt,
+        ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.now() - this.ocrFinishedAt,
+        lastSessionCheckAt: this.lastSessionCheckAt,
+        clockSampleAgeMs: this.state.clock ? this.now() - this.state.clock.receivedAt : void 0,
         clockRttMs: this.state.clock?.rttMs,
         serverOffsetMs: this.serverNow() - this.now(),
-        sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.monotonic() - this.lastSessionCheckAt.mono,
+        sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.now() - this.lastSessionCheckAt,
         visibility: document.visibilityState
       });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
