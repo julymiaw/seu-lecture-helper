@@ -29,7 +29,7 @@ export function visible(element: Element) {
 export class Mount {
   private items: Activity[] = [];
   private reservationUpdates = new Map<string, boolean>();
-  private active?: {id: string; label: string};
+  private active?: {ids: string[]; label: string};
   private observer?: MutationObserver;
   private timer?: ReturnType<typeof setTimeout>;
   private epoch = 0;
@@ -66,9 +66,10 @@ export class Mount {
     if (this.reservationUpdates.get(id) === reserved) return;
     this.reservationUpdates.set(id, reserved); this.scan();
   }
-  setActive(id?: string, label = '') {
-    if (this.active?.id === id && this.active?.label === label) return;
-    this.active = id && label ? {id, label} : undefined; this.scan();
+  setActive(ids: string[] = [], label = '') {
+    if (this.active?.label === label && this.active.ids.length === ids.length && this.active.ids.every((id, i) => id === ids[i])) return;
+    if (!this.active && (!ids.length || !label)) return;
+    this.active = ids.length && label ? {ids, label} : undefined; this.scan();
   }
   scan() {
     if (this.stopped) return;
@@ -100,7 +101,7 @@ export class Mount {
         parent.append(button);
       }
       const reserved = this.reservationUpdates.get(id) ?? this.items.find(item => item.id === id)?.reserved ?? false;
-      const label = reserved ? '已预约' : this.active?.id === id ? this.active.label : '预约助手';
+      const label = reserved ? '已预约' : this.active?.ids.includes(id) ? this.active.label : '预约助手';
       if (button!.textContent !== label) button!.textContent = label;
       button!.dataset.reserved = String(reserved);
       button!.title = reserved ? '已确认预约；点击可重新查询当前状态' : '打开预约助手';

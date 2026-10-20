@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.6
+// @version      0.7.7
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -183,7 +183,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.6";
+  var version = "0.7.7";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -1219,9 +1219,10 @@ button:disabled{opacity:.5;cursor:default}
       this.reservationUpdates.set(id, reserved);
       this.scan();
     }
-    setActive(id, label = "") {
-      if (this.active?.id === id && this.active?.label === label) return;
-      this.active = id && label ? { id, label } : void 0;
+    setActive(ids = [], label = "") {
+      if (this.active?.label === label && this.active.ids.length === ids.length && this.active.ids.every((id, i) => id === ids[i])) return;
+      if (!this.active && (!ids.length || !label)) return;
+      this.active = ids.length && label ? { ids, label } : void 0;
       this.scan();
     }
     scan() {
@@ -1263,7 +1264,7 @@ button:disabled{opacity:.5;cursor:default}
           parent.append(button);
         }
         const reserved = this.reservationUpdates.get(id) ?? this.items.find((item) => item.id === id)?.reserved ?? false;
-        const label = reserved ? "\u5DF2\u9884\u7EA6" : this.active?.id === id ? this.active.label : "\u9884\u7EA6\u52A9\u624B";
+        const label = reserved ? "\u5DF2\u9884\u7EA6" : this.active?.ids.includes(id) ? this.active.label : "\u9884\u7EA6\u52A9\u624B";
         if (button.textContent !== label) button.textContent = label;
         button.dataset.reserved = String(reserved);
         button.title = reserved ? "\u5DF2\u786E\u8BA4\u9884\u7EA6\uFF1B\u70B9\u51FB\u53EF\u91CD\u65B0\u67E5\u8BE2\u5F53\u524D\u72B6\u6001" : "\u6253\u5F00\u9884\u7EA6\u52A9\u624B";
@@ -4186,7 +4187,7 @@ button:disabled{opacity:.5;cursor:default}
           if (state.verifiedId) mount.setReserved(state.verifiedId, true);
           else if (state.activity && state.phase !== "closed") mount.setReserved(state.activity.id, state.activity.reserved);
           const label = state.phase === "waiting" ? "\u7B49\u5F85\u4E2D" : ["captcha-loading", "recognizing", "prepared", "submitting", "verifying"].includes(state.phase) ? "\u9884\u7EA6\u4E2D" : "";
-          mount.setActive(label ? state.activity?.id : void 0, label);
+          mount.setActive((state.candidates ?? (state.activity ? [state.activity] : [])).map((activity2) => activity2.id), label);
           current?.dialog.render(state);
         }, Date.now, ocr);
         const dialog = new Dialog({

@@ -38,6 +38,19 @@ describe('mounting', () => {
     cards[0].querySelector<HTMLButtonElement>('.seu-lecture-helper-button')!.click(); expect(open).toHaveBeenCalledWith(data.activities[0].id); expect(native).not.toHaveBeenCalled();
     cards[0].parentElement!.append(cards[0]); mount.scan(); mount.scan(); expect(document.querySelectorAll('.seu-lecture-helper-button')).toHaveLength(2); mount.stop();
   });
+  it('synchronizes candidate buttons through waiting, execution and task cleanup', async () => {
+    document.body.innerHTML=fixture('list.html'); const data=await list();
+    data.activities.forEach(activity=>{activity.reserved=false;});
+    const mount=new Mount({list:vi.fn(async()=>data)},vi.fn()); mount.start(); await Promise.resolve(); await Promise.resolve();
+    const ids=data.activities.map(activity=>activity.id);
+    const labels=()=>[...document.querySelectorAll('.seu-lecture-helper-button')].map(button=>button.textContent);
+    mount.setActive(ids,'等待中'); expect(labels()).toEqual(['等待中','等待中']);
+    mount.scan(); expect(labels()).toEqual(['等待中','等待中']);
+    mount.setActive(ids,'预约中'); expect(labels()).toEqual(['预约中','预约中']);
+    mount.setReserved(ids[1],true); mount.setActive(); expect(labels()).toEqual(['预约助手','已预约']);
+    mount.setReserved(ids[1],false); mount.setActive([ids[0]],'等待中'); expect(labels()).toEqual(['等待中','预约助手']);
+    mount.setActive(); expect(labels()).toEqual(['预约助手','预约助手']); mount.stop();
+  });
   it('uses readonly Vue ID even when no interface data was loaded', () => {
     document.body.innerHTML=fixture('list.html'); const card=document.querySelector('.activity-container')!;
     Object.assign(card,{__vue__:{$parent:{$props:{item:{WID:'exact-id'}}}}});
