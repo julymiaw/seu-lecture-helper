@@ -14,6 +14,7 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
   const ocr = new BrowserOcr();
   let current: {task: Reservation; dialog: Dialog; release: () => void} | undefined;
   let opening = false;
+  let restoreRequested = false;
   function notice(text: string) {
     document.getElementById('seu-lecture-helper-notice')?.remove();
     const item = document.createElement('div'); item.id = 'seu-lecture-helper-notice'; item.setAttribute('role', 'status'); item.textContent = text;
@@ -46,11 +47,15 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
       if(!recovery)task.requestPairChoice(id);
       if(recovery && task.state.phase!=='login-required'){if(recovery.verify)await task.restoreVerification();else if(task.state.phase==='ready')task.start();}
     } catch (error) {release?.(); notice(message(error));}
-    finally {opening = false;}
+    finally {opening = false;if(restoreRequested){restoreRequested=false;restore();}}
   }
   const mount = new Mount(api, id => {void open(id);});
   mount.start();
-  const pending=readTask();if(pending)void open(pending.id,pending);
+  function restore() {
+    if(opening){restoreRequested=true;return;}
+    const pending=readTask();if(pending&&!current)void open(pending.id,pending);
+  }
+  restore();
   window.addEventListener('pagehide', () => {mount.stop(); close(false);void logStore.flush();});
-  window.addEventListener('pageshow', event => {if (event.persisted) mount.start();});
+  window.addEventListener('pageshow', event => {if (event.persisted) {mount.start();restore();}});
 }

@@ -46,3 +46,10 @@ it('ignores unused legacy timing fields, including on expired writes pending ver
   sessionStorage.setItem('seu-lecture-pending-task',JSON.stringify({id:'legacy',endsAt:NOW-1,verify:true,leadSeconds:'unused'}));
   expect(readTask()).toMatchObject({id:'legacy',verify:true});
 });
+
+it('storage getter failure cannot interrupt task publishing or recovery',async()=>{
+  const activity=await sample();
+  vi.spyOn(window,'sessionStorage','get').mockImplementation(()=>{throw new DOMException('blocked','SecurityError');});
+  expect(()=>saveTask({phase:'waiting',message:'',activity,armed:true})).not.toThrow();
+  expect(readTask()).toBeUndefined();expect(()=>clearTask()).not.toThrow();
+});

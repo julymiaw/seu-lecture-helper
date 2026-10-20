@@ -11,17 +11,18 @@ describe('protocol and samples', () => {
   it('merges by ID, handles mixed numeric fields, preserves distinct events', async () => {
     const fetcher = vi.fn(async () => response(raw));
     const result = await new Api(fetcher, () => NOW).list();
-    expect(result.clock.offset).toBe(0); expect(result.activities).toHaveLength(6);
+    expect(result.activities).toHaveLength(6);
     expect(result.activities[0]).toMatchObject({count: 626, capacity: 5000, reserved: true});
     expect(result.activities[1].reserved).toBe(false);
     expect(result.activities[2].id).not.toBe(result.activities[3].id);
     const [url, init] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(BASE + 'queryActivityList.do'); expect(init).toMatchObject({method:'POST', body:'', credentials:'same-origin'});
   });
-  it('estimates clock offset from request midpoint', async () => {
-    const localTime=vi.fn().mockReturnValueOnce(NOW-2000).mockReturnValueOnce(NOW);
-    const result=await new Api(vi.fn(async()=>response(raw)),localTime).list();
-    expect(result.clock).toEqual({serverTime:NOW,receivedAt:NOW,rttMs:2000,offset:1000});
+  it('does not require server time to read activities or details', async () => {
+    const data=clone(raw);delete (data.datas as {xtdqsj?:string}).xtdqsj;
+    expect((await new Api(vi.fn(async()=>response(data))).list()).activities).toHaveLength(6);
+    const info=clone(detail);delete (info.datas as {xtdqsj?:string}).xtdqsj;
+    expect((await new Api(vi.fn(async()=>response(info))).detail(info.datas.hdxq.WID)).activity.id).toBe(info.datas.hdxq.WID);
   });
   it('uses timestamp GET for captcha and preserves MIME', async () => {
     const transport = vi.fn(async () => response(envelope('data:image/jpeg;base64,VEVTVA==')));

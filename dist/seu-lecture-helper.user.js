@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.8
+// @version      1.0.0
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -145,27 +145,19 @@ SOFTWARE.
         clearTimeout(timer);
       }
     }
-    clockSample(value, startedAt) {
-      const receivedAt = this.now(), rttMs = receivedAt - startedAt, serverTime = schoolTime(value);
-      return { serverTime, receivedAt, rttMs, offset: serverTime - (startedAt + receivedAt) / 2 };
-    }
     async list() {
-      const before = this.now();
       const data = await this.request("queryActivityList.do", {});
-      const clock = this.clockSample(data.xtdqsj, before);
       const counts = new Map(rows(data.hdrsList ?? []).map((x) => [String(x.HD_WID), x.YYRS]));
       const bookings = new Map(rows(data.xsxxList ?? []).map((x) => [String(x.WID), x]));
       const unique = new Map(rows(data.hdlbList).map((row) => [String(row.WID), row]));
-      return { clock, activities: [...unique.values()].map((row) => activity({ ...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID)) })) };
+      return { activities: [...unique.values()].map((row) => activity({ ...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID)) })) };
     }
     async detail(id) {
-      const before = this.now();
       const data = await this.request("getActivityDetail.do", { wid: id });
-      const clock = this.clockSample(data?.xtdqsj, before);
       if (!data?.hdxq) throw new ApiError("\u672A\u627E\u5230\u6D3B\u52A8\u8BE6\u60C5", "format");
       const item = activity(data.hdxq);
       if (item.id !== id) throw new ApiError("\u6D3B\u52A8\u8BE6\u60C5 ID \u4E0D\u5339\u914D", "format");
-      return { activity: item, clock };
+      return { activity: item };
     }
     async captcha() {
       const image = await this.request("vcode.do?_=" + this.now());
@@ -183,7 +175,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.8";
+  var version = "1.0.0";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -365,9 +357,8 @@ SOFTWARE.
     constructor(run) {
       this.run = run ?? this.id;
     }
-    started = performance.now();
     record(level, event, fields = {}) {
-      const row = { ...fields, version: VERSION, run: this.run, task: this.id, seq: ++this.seq, at: (/* @__PURE__ */ new Date()).toISOString(), elapsedMs: Math.round(performance.now() - this.started), level, event };
+      const row = { ...fields, version: VERSION, run: this.run, task: this.id, seq: ++this.seq, at: (/* @__PURE__ */ new Date()).toISOString(), level, event };
       try {
         logStore.append(row);
       } catch {
@@ -379,14 +370,14 @@ SOFTWARE.
       if (event === "\u72B6\u6001\u53D8\u5316" && ["success", "failed", "unknown", "login-required", "closed"].includes(String(fields.phase))) void logStore.flush();
     }
     async measure(stage, operation, fields = {}, stale = () => false) {
-      this.record("log", stage + "\u5F00\u59CB", fields);
+      if (stage === "\u9884\u7EA6\u63D0\u4EA4") this.record("log", stage + "\u5F00\u59CB", fields);
       const started = performance.now();
       try {
         const result = await operation();
-        this.record("log", stage + "\u5B8C\u6210", { ...fields, durationMs: Math.round(performance.now() - started), stale: stale() });
+        this.record("log", stage + "\u5B8C\u6210", { ...fields, durationMs: Math.round(performance.now() - started), ...stale() ? { stale: true } : {} });
         return result;
       } catch (error) {
-        this.record(failureLevel(error), stage + "\u5931\u8D25", { ...fields, durationMs: Math.round(performance.now() - started), stale: stale(), ...errorInfo(error) });
+        this.record(failureLevel(error), stage + "\u5931\u8D25", { ...fields, durationMs: Math.round(performance.now() - started), ...stale() ? { stale: true } : {}, ...errorInfo(error) });
         throw error;
       }
     }
@@ -456,37 +447,22 @@ SOFTWARE.
     nextSessionCheck = 0;
     sessionChecking = false;
     expectedTickAt;
-    finalTimeObserved = false;
+    finalSessionChecked = false;
     diagnostics = new Diagnostics();
-    captchaSentAt;
     captchaReceivedAt;
-    ocrFinishedAt;
     lastSessionCheckAt;
-    recordClock(sample, source) {
-      const previous = this.state.clock;
-      this.state = { ...this.state, clock: sample };
-      this.diagnostics.record("log", "\u670D\u52A1\u5668\u65F6\u95F4\u89C2\u6D4B", {
-        source,
-        serverTime: new Date(sample.serverTime).toISOString(),
-        requestRttMs: sample.rttMs,
-        serverOffsetMs: sample.offset,
-        previousOffsetMs: previous?.offset,
-        correctionMs: previous ? sample.offset - previous.offset : void 0,
-        timingApplied: false
-      });
-    }
     valid(g) {
       return g === this.generation && this.state.phase !== "closed";
     }
     stage(name, operation, stale = () => false) {
       const g = this.generation;
-      return this.diagnostics.measure(name, operation, { activityId: this.state.activity?.id ?? this.targetId, candidateMode: this.state.activity ? mode(this.state.activity) : void 0, priority: (this.state.candidateIndex ?? 0) + 1, round: this.round, submissions: this.submissions }, () => !this.valid(g) || stale());
+      return this.diagnostics.measure(name, operation, { activityId: this.state.activity?.id ?? this.targetId, round: this.round }, () => !this.valid(g) || stale());
     }
     set(phase, message2, extra = {}) {
       const from = this.state.phase;
       this.state = { ...this.state, ...extra, phase, message: message2 };
       this.publish(this.state);
-      if (from !== phase) this.diagnostics.record(["failed", "unknown", "login-required"].includes(phase) ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", { from, phase, round: this.round, submissions: this.submissions, reason: businessReason(message2) });
+      if (from !== phase) this.diagnostics.record(["failed", "unknown", "login-required"].includes(phase) ? "warn" : "log", "\u72B6\u6001\u53D8\u5316", { from, phase, round: this.round, submissions: this.submissions, reason: ["failed", "unknown", "login-required"].includes(phase) ? businessReason(message2) : void 0 });
     }
     bookable() {
       const a = this.state.activity;
@@ -532,16 +508,14 @@ SOFTWARE.
       this.recovery = recovery;
       const g = ++this.generation;
       this.diagnostics = new Diagnostics(recovery?.runId);
-      this.captchaSentAt = void 0;
       this.captchaReceivedAt = void 0;
-      this.ocrFinishedAt = void 0;
       this.lastSessionCheckAt = void 0;
       this.round = 0;
       this.submissions = 0;
       this.preparing = void 0;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
-      this.finalTimeObserved = false;
+      this.finalSessionChecked = false;
       this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", runId: this.diagnostics.run, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online" };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id, recovered: Boolean(recovery), verifyOnly: Boolean(recovery?.verify) });
@@ -553,14 +527,11 @@ SOFTWARE.
         const data = await this.stage("\u6D3B\u52A8\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
         let activity2 = data.activities.find((a) => a.id === id);
-        this.recordClock(data.clock, "\u6D3B\u52A8\u5217\u8868");
         if (!activity2) {
           const detail = await this.stage("\u6D3B\u52A8\u8BE6\u60C5\u67E5\u8BE2", () => this.api.detail(id));
           if (!this.valid(g)) return;
           activity2 = detail.activity;
-          this.recordClock(detail.clock, "\u6D3B\u52A8\u8BE6\u60C5");
         }
-        if (!this.valid(g)) return;
         let candidates;
         if (recovery?.ids) {
           candidates = [];
@@ -647,7 +618,7 @@ SOFTWARE.
       if (!controls(this.state, this.now()).start || !this.bookable()) return;
       this.nextSessionCheck = this.now() + 6e4;
       this.set("waiting", "", { armed: true });
-      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { timingBasis: "local", submitDelayMs: SUBMIT_DELAY_MS, plannedLocalSubmitAt: new Date(this.state.activity.startsAt + SUBMIT_DELAY_MS).toISOString(), leadSeconds: CAPTURE_LEAD_MS / 1e3, serverOffsetMs: this.state.clock?.offset, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
+      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { timingBasis: "local", submitDelayMs: SUBMIT_DELAY_MS, plannedLocalSubmitAt: new Date(this.state.activity.startsAt + SUBMIT_DELAY_MS).toISOString(), leadSeconds: CAPTURE_LEAD_MS / 1e3, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
       this.tick();
     }
     requireLogin() {
@@ -676,20 +647,16 @@ SOFTWARE.
       this.set("unknown", "\u6062\u590D\u540E\u5148\u6838\u9A8C\u4E4B\u524D\u7684\u63D0\u4EA4\u7ED3\u679C", { armed: false });
       await this.verify();
     }
-    async checkSession(final) {
+    async checkSession() {
       const g = this.generation;
       try {
-        const result = await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.detail(this.state.activity.id));
-        if (!this.valid(g) || !this.state.armed) return;
+        await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.detail(this.state.activity.id), () => this.round > 0);
+        if (!this.valid(g) || !this.state.armed || this.round > 0) return;
         this.lastSessionCheckAt = this.now();
-        if (this.round === 0) this.recordClock(result.clock, final ? "\u5F00\u653E\u524D\u6700\u7EC8\u89C2\u6D4B" : "\u5468\u671F\u4FDD\u6D3B");
-        else this.diagnostics.record("warn", "\u65F6\u95F4\u89C2\u6D4B\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", requestRttMs: result.clock.rttMs });
       } catch (error) {
-        if (!this.valid(g) || !this.state.armed) return;
-        if (this.round > 0) this.diagnostics.record("warn", "\u767B\u5F55\u68C0\u67E5\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", ...errorInfo(error) });
-        else if (error instanceof ApiError && error.kind === "session") this.requireLogin();
+        if (!this.valid(g) || !this.state.armed || this.round > 0) return;
+        if (error instanceof ApiError && error.kind === "session") this.requireLogin();
         else if (error instanceof ApiError && error.kind === "rate") this.stop(message(error));
-        else this.diagnostics.record("warn", "\u767B\u5F55\u68C0\u67E5\u672A\u786E\u8BA4\uFF0C\u4FDD\u7559\u539F\u5B9A\u65F6", { ...errorInfo(error) });
       } finally {
         if (this.valid(g)) {
           this.sessionChecking = false;
@@ -704,12 +671,12 @@ SOFTWARE.
       const remaining = this.state.activity.startsAt - this.now();
       this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
       if (this.round === 0 && !this.sessionChecking && remaining > CAPTURE_LEAD_MS) {
-        const final = remaining <= 4e4 && !this.finalTimeObserved;
+        const final = remaining <= 4e4 && !this.finalSessionChecked;
         if (final || remaining > 4e4 && this.now() >= this.nextSessionCheck) {
-          if (final) this.finalTimeObserved = true;
+          if (final) this.finalSessionChecked = true;
           this.nextSessionCheck = this.now() + 6e4;
           this.sessionChecking = true;
-          void this.checkSession(final);
+          void this.checkSession();
         }
       }
       if (this.round === 0 && remaining <= CAPTURE_LEAD_MS) void this.loadCaptcha();
@@ -726,17 +693,14 @@ SOFTWARE.
       if (!this.state.armed || this.state.phase !== "waiting" || !this.bookable()) return;
       const g = this.generation, epoch = ++this.ocrEpoch;
       ++this.round;
-      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedLocalCaptureAt: new Date(this.state.activity.startsAt - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.now() - this.state.activity.startsAt + CAPTURE_LEAD_MS, serverOffsetMs: this.state.clock?.offset, afterOpenMs: this.now() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedLocalCaptureAt: new Date(this.state.activity.startsAt - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.now() - this.state.activity.startsAt + CAPTURE_LEAD_MS, afterOpenMs: this.now() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          this.captchaSentAt = this.now();
           this.captchaReceivedAt = void 0;
-          this.ocrFinishedAt = void 0;
           const image = await this.stage("\u9A8C\u8BC1\u7801\u83B7\u53D6", () => this.api.captcha());
           if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
           this.captchaReceivedAt = this.now();
-          this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u5230\u8FBE", { round: this.round, requestAttempt: attempt + 1, captchaSentAt: this.captchaSentAt, captchaReceivedAt: this.captchaReceivedAt });
           this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801");
           void this.recognize(image, epoch);
           return;
@@ -771,20 +735,18 @@ SOFTWARE.
       try {
         const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch)).trim();
         if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
-        this.ocrFinishedAt = this.now();
-        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, length: code.length, valid: /^\d{4}$/.test(code), ocrFinishedAt: this.ocrFinishedAt });
         if (!/^\d{4}$/.test(code)) {
-          await this.retryCaptcha();
+          await this.retryCaptcha("OCR \u8F93\u51FA\u4E0D\u662F\u56DB\u4F4D\u6570\u5B57");
           return;
         }
         this.set("prepared", "", { code, ocrStatus: "ready" });
         if (this.now() >= this.state.activity.startsAt + SUBMIT_DELAY_MS) await this.submit();
       } catch {
-        if (this.valid(g) && epoch === this.ocrEpoch) await this.retryCaptcha();
+        if (this.valid(g) && epoch === this.ocrEpoch) await this.retryCaptcha("OCR \u8BC6\u522B\u5931\u8D25");
       }
     }
-    async retryCaptcha() {
-      this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5");
+    async retryCaptcha(reason) {
+      if (reason) this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5", { reason, round: this.round });
       this.set("waiting", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801", { code: "" });
       await this.loadCaptcha();
     }
@@ -800,26 +762,14 @@ SOFTWARE.
         priority: (this.state.candidateIndex ?? 0) + 1,
         attempt: this.submissions,
         afterOpenMs: this.now() - this.state.activity.startsAt,
-        captchaSentAt: this.captchaSentAt,
-        captchaReceivedAt: this.captchaReceivedAt,
         captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.now() - this.captchaReceivedAt,
-        captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.now() - this.captchaSentAt,
-        ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.now() - this.ocrFinishedAt,
-        lastSessionCheckAt: this.lastSessionCheckAt,
-        clockSampleAgeMs: this.state.clock ? this.now() - this.state.clock.receivedAt : void 0,
-        clockRttMs: this.state.clock?.rttMs,
-        serverOffsetMs: this.state.clock?.offset,
-        timingBasis: "local",
-        submitDelayMs: SUBMIT_DELAY_MS,
         dispatchLateMs: this.now() - this.state.activity.startsAt - SUBMIT_DELAY_MS,
-        estimatedServerAfterOpenMs: this.state.clock ? this.now() + this.state.clock.offset - this.state.activity.startsAt : void 0,
         sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.now() - this.lastSessionCheckAt,
         visibility: document.visibilityState
       });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
       try {
         await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
-        this.diagnostics.record("log", "\u670D\u52A1\u7AEF\u62A5\u544A\u9884\u7EA6\u6210\u529F", { responseCode: 0, responseData: 1 });
       } catch (error) {
         if (!this.valid(g)) return;
         const reason = error instanceof ApiError && error.kind === "business" ? businessReason(error.message) : void 0;
@@ -828,7 +778,6 @@ SOFTWARE.
           candidateMode: mode(this.state.activity),
           priority: (this.state.candidateIndex ?? 0) + 1,
           attempt: this.submissions,
-          ...errorInfo(error),
           action
         });
         if (error instanceof ApiError && error.kind === "session") {
@@ -868,7 +817,6 @@ SOFTWARE.
           return;
         }
         recordDecision("\u6838\u9A8C\u5F53\u524D\u9884\u7EA6");
-        this.diagnostics.record("warn", "\u63D0\u4EA4\u7ED3\u679C\u4E0D\u660E\uFF0C\u8F6C\u5165\u6838\u9A8C", errorInfo(error));
       }
       if (this.valid(g)) await this.verify();
     }
@@ -4088,9 +4036,10 @@ button:disabled{opacity:.5;cursor:default}
 
   // src/task-store.ts
   var KEY = "seu-lecture-pending-task";
-  function saveTask(state, storage = sessionStorage) {
+  function saveTask(state, storage) {
     if (["loading", "ready", "closed"].includes(state.phase)) return;
     try {
+      storage ??= sessionStorage;
       if (state.phase === "success") {
         storage.removeItem(KEY);
         return;
@@ -4119,8 +4068,9 @@ button:disabled{opacity:.5;cursor:default}
     } catch {
     }
   }
-  function readTask(storage = sessionStorage) {
+  function readTask(storage) {
     try {
+      storage ??= sessionStorage;
       const task = JSON.parse(storage.getItem(KEY) ?? "null");
       if (task && typeof task.id === "string" && (task.runId === void 0 || typeof task.runId === "string" && task.runId.length > 0 && task.runId.length <= 150) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && (task.verify || task.endsAt > Date.now())) {
         if (task.version === void 0 && task.ids === void 0) return task;
@@ -4130,9 +4080,9 @@ button:disabled{opacity:.5;cursor:default}
     } catch {
     }
   }
-  function clearTask(storage = sessionStorage) {
+  function clearTask(storage) {
     try {
-      storage.removeItem(KEY);
+      (storage ?? sessionStorage).removeItem(KEY);
     } catch {
     }
   }
@@ -4155,13 +4105,21 @@ button:disabled{opacity:.5;cursor:default}
         current = void 0;
         if (clear) clearTask();
       }
+    }, restore = function() {
+      if (opening) {
+        restoreRequested = true;
+        return;
+      }
+      const pending = readTask();
+      if (pending && !current) void open(pending.id, pending);
     };
-    notice2 = notice, close2 = close;
+    notice2 = notice, close2 = close, restore2 = restore;
     document.documentElement.setAttribute("data-seu-lecture-helper", VERSION);
     const api = new Api();
     const ocr = new BrowserOcr();
     let current;
     let opening = false;
+    let restoreRequested = false;
     async function open(id, recovery) {
       if (current?.task.state.candidates?.some((a) => a.id === id)) {
         current.dialog.show();
@@ -4224,23 +4182,30 @@ button:disabled{opacity:.5;cursor:default}
         notice(message(error));
       } finally {
         opening = false;
+        if (restoreRequested) {
+          restoreRequested = false;
+          restore();
+        }
       }
     }
     const mount = new Mount(api, (id) => {
       void open(id);
     });
     mount.start();
-    const pending = readTask();
-    if (pending) void open(pending.id, pending);
+    restore();
     window.addEventListener("pagehide", () => {
       mount.stop();
       close(false);
       void logStore.flush();
     });
     window.addEventListener("pageshow", (event) => {
-      if (event.persisted) mount.start();
+      if (event.persisted) {
+        mount.start();
+        restore();
+      }
     });
   }
   var notice2;
   var close2;
+  var restore2;
 })();

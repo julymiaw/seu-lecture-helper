@@ -10,7 +10,7 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{serverOffsetMs?:number;expireSubmitOnce?:boolean;resumeStatus?:number;failResumeOnce?:boolean;bookedInitially?:boolean;pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
+async function setup(page:Page, options:{beforeList?:()=>Promise<void>;serverOffsetMs?:number;expireSubmitOnce?:boolean;resumeStatus?:number;failResumeOnce?:boolean;bookedInitially?:boolean;pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
   const initialTime=await page.evaluate(()=>Date.now());
   let resumeFailures=0,expiredWrite=false;
   let booked=Boolean(options.bookedInitially),bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,detailCalls=0,assetCalls=0;
@@ -38,7 +38,7 @@ async function setup(page:Page, options:{serverOffsetMs?:number;expireSubmitOnce
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(options.pair){const first=data.datas.hdlbList[0];first.JZMC=options.unlabelled?'【艺术】同一讲座':'【线上】【艺术】同一讲座';first.JZDD='腾讯会议';const second={...first,WID:'offline-fixture',JZMC:options.unlabelled?'【艺术】同一讲座':'【线下】【艺术】同一讲座',JZDD:'九龙湖报告厅'};data.datas.hdlbList=[first,second];data.datas.hdrsList=[{HD_WID:first.WID,YYRS:0},{HD_WID:second.WID,YYRS:0}];}
-    if(name==='queryActivityList.do') {if(options.failResumeOnce&&(captchaCalls>0||detailCalls>0)&&resumeFailures++===0)return route.fulfill({status:options.resumeStatus??401,body:'unavailable'});result=data;}
+    if(name==='queryActivityList.do') {await options.beforeList?.();if(options.failResumeOnce&&(captchaCalls>0||detailCalls>0)&&resumeFailures++===0)return route.fulfill({status:options.resumeStatus??401,body:'unavailable'});result=data;}
     else if(name==='getActivityDetail.do') {
       detailCalls++;events.push('detail');
       if(options.expireProbeOnce&&detailCalls===1)return route.fulfill({status:401,body:'unauthorized'});
@@ -269,7 +269,7 @@ test('single candidate has the same row-based progress and no duplicate status o
   await expect(progress(page)).toHaveText('等待开放');await expect(page.locator('#status')).toBeHidden();await expect(page.locator('#failure, #preparation, #labels, select')).toHaveCount(0);await page.clock.fastForward(30000);await expect(progress(page)).toHaveText('预约成功');expect(state.writes()).toBe(1);
   const aligned=await page.locator('.actions').evaluate(el=>{const a=el.getBoundingClientRect(),exportButton=el.querySelector('#export')!.getBoundingClientRect(),close=el.querySelector('#close')!.getBoundingClientRect();return Math.abs(exportButton.left-a.left)<1&&Math.abs(close.right-a.right)<1;});expect(aligned).toBe(true);
 });
-test('final detail time observation precedes captcha preparation and critical-stage requests remain serial',async({page})=>{
+test('final session check precedes captcha preparation and critical-stage requests remain serial',async({page})=>{
   await page.clock.install();const state=await setup(page,{future:true});await openHelper(page);await page.locator('#start').click();
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
   await page.clock.fastForward(3560500);await expect.poll(state.detailCalls).toBe(1);expect(state.captchaCalls()).toBe(0);
@@ -317,4 +317,38 @@ test('waiting task survives detail navigation and browser back/forward',async({p
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','waiting');
   await page.locator('#close').click();await expect(page.getByRole('button',{name:'预约助手',exact:true})).toHaveCount(2);
   expect(await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'))).toBeNull();
+});
+
+
+test('cached page lifecycle restores waiting intent after pageshow',async({page})=>{
+  const state=await setup(page,{pair:true,future:true});await openHelper(page);await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','waiting');
+  const pending=await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'));
+  await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true})));
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveCount(0);
+  expect(await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'))).toBe(pending);
+  await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true})));
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','waiting');
+  await expect(page.getByRole('button',{name:'等待中',exact:true})).toHaveCount(2);
+  expect(state.writes()).toBe(0);expect(state.captchaCalls()).toBe(0);
+  await page.locator('#close').click();await openHelper(page);await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','waiting');
+});
+
+
+test('page return during a pending recovery queues restoration instead of losing intent',async({page})=>{
+  let release!:()=>void;let gate:Promise<void>|undefined;
+  const state=await setup(page,{pair:true,future:true,beforeList:async()=>{await gate;}});
+  await openHelper(page);await page.locator('#start').click();
+  gate=new Promise<void>(resolve=>{release=resolve;});
+  await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true})));
+  await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true})));
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','loading');
+  await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide',{persisted:true})));
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveCount(0);
+  await page.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pageshow',{persisted:true})));
+  release();gate=undefined;
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','waiting');
+  await expect(page.getByRole('button',{name:'等待中',exact:true})).toHaveCount(2);
+  expect(state.writes()).toBe(0);expect(state.captchaCalls()).toBe(0);
 });

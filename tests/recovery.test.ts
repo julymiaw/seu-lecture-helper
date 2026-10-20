@@ -1,4 +1,3 @@
-import {clockSample} from './helpers';
 import {expect,it,vi} from 'vitest';
 import {Reservation} from '../src/reservation';
 import {ApiError} from '../src/api';
@@ -10,7 +9,7 @@ it.each([0,1])('repeated authentication failures preserve candidate group and pr
   vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();
   const online={...await sample(),id:'on',title:'【线上】同一讲座',reserved:false,startsAt:NOW+180000},offline={...online,id:'off',title:'【线下】同一讲座',place:'报告厅'};
   const intent={verify:false,ids:['off','on'],index,preferred:'offline' as const};
-  const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],clock:clockSample()})),detail:vi.fn(async()=>{throw new ApiError('未登录','session',401);})});
+  const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline]})),detail:vi.fn(async()=>{throw new ApiError('未登录','session',401);})});
   const task=new Reservation(api,s=>saveTask(s),Date.now,engine());await task.open(intent.ids[index],intent);task.start();await vi.advanceTimersByTimeAsync(60000);
   expect(task.state.phase).toBe('login-required');const before=readTask();expect(before).toMatchObject(intent);
   vi.mocked(api.list).mockRejectedValueOnce(new ApiError('未登录','session',401)).mockRejectedValueOnce(new ApiError('未登录','session',401));
@@ -41,7 +40,7 @@ it.each(['network','format'] as const)('a %s failure loading recovery metadata r
 });
 it('same-page verification login recovery preserves the candidate display and publishes the verified ID',async()=>{
   vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();const online={...await sample(),id:'on',title:'【线上】【艺术】同一讲座',reserved:false,startsAt:NOW-1000},offline={...online,id:'off',title:'【线下】【艺术】同一讲座',place:'报告厅'};
-  const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],clock:clockSample()})),submit:vi.fn().mockRejectedValueOnce(new ApiError('人数已满','business')).mockRejectedValueOnce(new ApiError('未登录','session',401))});
+  const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline]})),submit:vi.fn().mockRejectedValueOnce(new ApiError('人数已满','business')).mockRejectedValueOnce(new ApiError('未登录','session',401))});
   const task=new Reservation(api,s=>saveTask(s),Date.now,engine());await task.open(online.id);task.start();await flush();expect(task.state.phase).toBe('login-required');const candidates=task.state.candidates;
   await task.resume();expect(task.state.phase).toBe('success');expect(task.state.activity?.title).toBe(offline.title);expect(task.state.activity?.reserved).toBe(true);expect(task.state.verifiedId).toBe('off');expect(task.state.candidates).toEqual(candidates);expect(task.state.fullIds).toEqual(['on']);expect(task.state.candidateIndex).toBe(1);expect(api.list).toHaveBeenCalledTimes(1);expect(api.submit).toHaveBeenCalledTimes(2);expect(readTask()).toBeUndefined();
 });
@@ -50,7 +49,7 @@ it('countdown ticks do not rewrite intent, but changing candidates and entering 
   const online={...await sample(),id:'on',title:'【线上】同一讲座',reserved:false,startsAt:NOW+60000};
   const offline={...online,id:'off',title:'【线下】同一讲座'};
   const writes:ReturnType<typeof readTask>[]=[],storage=trackedStorage(),set=storage.setItem;
-  const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],clock:clockSample()})),submit:vi.fn(async()=>{
+  const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline]})),submit:vi.fn(async()=>{
     writes.push(readTask(storage));
     if(readTask(storage)?.id==='on')throw new ApiError('人数已满','business');
   })});

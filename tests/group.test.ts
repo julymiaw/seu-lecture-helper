@@ -1,4 +1,3 @@
-import {clockSample} from './helpers';
 import {expect,it,vi} from 'vitest';
 import {Reservation,controls,type Recovery} from '../src/reservation';
 import {ApiError} from '../src/api';
@@ -8,7 +7,7 @@ async function setup(recovery?:Recovery,unlabelled=false){
   vi.useFakeTimers();vi.setSystemTime(NOW);
   const online={...await sample(),id:'online',title:unlabelled?'同一讲座':'【线上】同一讲座',reserved:false,startsAt:NOW-1000};
   const offline={...online,id:'offline',title:unlabelled?'同一讲座':'【线下】同一讲座',place:'线下报告厅'};
-  const api=await mockApi({list:vi.fn(async()=>({activities:[offline,online],clock:clockSample()}))});
+  const api=await mockApi({list:vi.fn(async()=>({activities:[offline,online]}))});
   const engine={prepare:vi.fn(async()=>{}),recognize:vi.fn(async()=> '0733')};
   const task=new Reservation(api,vi.fn(),Date.now,engine);await task.open(recovery?.ids?.[recovery.index??0]??'offline',recovery);await flush();return{task,api,online,offline};
 }
@@ -55,7 +54,7 @@ it('session recovery on the second candidate keeps the group index and only veri
   expect(task.state.phase).toBe('login-required');expect(task.state.candidateIndex).toBe(1);await task.resume();expect(api.booked).toHaveBeenCalledWith('offline');expect(api.submit).toHaveBeenCalledTimes(2);expect(task.state.phase).toBe('success');
 });
 it('an existing booking in either variant prevents any new write',async()=>{
-  const{task,api,online,offline}=await setup();vi.mocked(api.list).mockResolvedValue({activities:[{...offline,reserved:true},online],clock:clockSample()});await task.open('online');task.start();await flush();
+  const{task,api,online,offline}=await setup();vi.mocked(api.list).mockResolvedValue({activities:[{...offline,reserved:true},online]});await task.open('online');task.start();await flush();
   expect(task.state.phase).toBe('success');expect(task.state.activity?.id).toBe('offline');expect(task.state.candidateIndex).toBe(1);expect(api.submit).not.toHaveBeenCalled();
 });
 
@@ -72,14 +71,14 @@ it('legacy unclassified groups recover only the current target, without using sa
   const{task,api}=await setup({ids:['online','offline'],index:1,preferred:'online',verify:false},true);expect(task.state.candidates?.map(a=>a.id)).toEqual(['offline']);expect(task.state.candidateIndex).toBe(0);task.start();await flush();expect(api.submit).toHaveBeenCalledExactlyOnceWith('offline','0733');
 });
 it('a booked alternate in a legacy unclassified group still prevents any new write',async()=>{
-  const{task,api,online,offline}=await setup(undefined,true);vi.mocked(api.list).mockResolvedValue({activities:[{...online,reserved:true},offline],clock:clockSample()});await task.open('offline',{ids:['online','offline'],index:1,preferred:'online',verify:false});task.start();await flush();expect(task.state.phase).toBe('success');expect(task.state.activity?.id).toBe('online');expect(api.submit).not.toHaveBeenCalled();
+  const{task,api,online,offline}=await setup(undefined,true);vi.mocked(api.list).mockResolvedValue({activities:[{...online,reserved:true},offline]});await task.open('offline',{ids:['online','offline'],index:1,preferred:'online',verify:false});task.start();await flush();expect(task.state.phase).toBe('success');expect(task.state.activity?.id).toBe('online');expect(api.submit).not.toHaveBeenCalled();
 });
 
 it.each(['rescheduled','renamed','ambiguous'] as const)('restores only the current target when the saved pair becomes %s',async change=>{
   const {task,api,online,offline}=await setup();
   const alternate=change==='rescheduled'?{...offline,eventStart:'2099-01-01'}:change==='renamed'?{...offline,title:'【线下】不同讲座'}:offline;
   const activities=[online,alternate,...(change==='ambiguous'?[{...offline,id:'third'}]:[])];
-  vi.mocked(api.list).mockResolvedValue({activities,clock:clockSample()});
+  vi.mocked(api.list).mockResolvedValue({activities});
   await task.open('online',{ids:['online','offline'],index:0,preferred:'online',verify:false});
   expect(task.state.candidates?.map(a=>a.id)).toEqual(['online']);
   vi.mocked(api.submit).mockRejectedValue(new ApiError('人数已满','business'));

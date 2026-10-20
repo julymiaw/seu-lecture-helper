@@ -1,15 +1,14 @@
-import type {ClockSample} from './clock';
 import {ApiError, type Activity, type ReservationApi} from './api';
 import type {OcrEngine} from './ocr';
 import {findCandidates,ordered,classified,mode,type Mode} from './candidates';
-import {Diagnostics, businessReason, errorInfo} from './diagnostics';
+import {Diagnostics, businessReason} from './diagnostics';
 export type Phase = 'choosing' | 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'prepared' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
 export const CAPTURE_LEAD_MS=30000;
 export const SUBMIT_DELAY_MS=50;
 export interface Recovery {runId?:string;verify:boolean;ids?:string[];index?:number;preferred?:Mode}
 export interface State {
   fullIds?:string[]; requestedId?:string; candidates?:Activity[]; candidateIndex?:number; preferred?:Mode;
-  phase: Phase; message: string; runId?:string; verifiedId?:string; activity?: Activity; clock?:ClockSample; remaining?: number;
+  phase: Phase; message: string; runId?:string; verifiedId?:string; activity?: Activity; remaining?: number;
   code?: string; armed?: boolean;
   ocrStatus?: 'loading' | 'ready' | 'failed'; verifyAfterLogin?:boolean;
 }
@@ -35,31 +34,20 @@ export class Reservation {
   private nextSessionCheck=0;
   private sessionChecking=false;
   private expectedTickAt?:number;
-  private finalTimeObserved=false;
+  private finalSessionChecked=false;
   private diagnostics=new Diagnostics();
-  private captchaSentAt?:number;
   private captchaReceivedAt?:number;
-  private ocrFinishedAt?:number;
   private lastSessionCheckAt?:number;
   constructor(private api:ReservationApi, private publish:(state:State)=>void, private now=Date.now, private ocr:OcrEngine) {}
-  private recordClock(sample:ClockSample,source:string) {
-    const previous=this.state.clock;
-    this.state={...this.state,clock:sample};
-    this.diagnostics.record('log','服务器时间观测',{
-      source,serverTime:new Date(sample.serverTime).toISOString(),requestRttMs:sample.rttMs,
-      serverOffsetMs:sample.offset,previousOffsetMs:previous?.offset,
-      correctionMs:previous?sample.offset-previous.offset:undefined,timingApplied:false,
-    });
-  }
   private valid(g:number) {return g===this.generation && this.state.phase!=='closed';}
   private stage<T>(name:string,operation:()=>Promise<T>,stale=()=>false) {
     const g=this.generation;
-    return this.diagnostics.measure(name,operation,{activityId:this.state.activity?.id??this.targetId,candidateMode:this.state.activity?mode(this.state.activity):undefined,priority:(this.state.candidateIndex??0)+1,round:this.round,submissions:this.submissions},()=>!this.valid(g)||stale());
+    return this.diagnostics.measure(name,operation,{activityId:this.state.activity?.id??this.targetId,round:this.round},()=>!this.valid(g)||stale());
   }
   private set(phase:Phase,message:string,extra:Partial<State>={}) {
     const from=this.state.phase;
     this.state={...this.state,...extra,phase,message}; this.publish(this.state);
-    if(from!==phase)this.diagnostics.record(['failed','unknown','login-required'].includes(phase)?'warn':'log','状态变化',{from,phase,round:this.round,submissions:this.submissions,reason:businessReason(message)});
+    if(from!==phase)this.diagnostics.record(['failed','unknown','login-required'].includes(phase)?'warn':'log','状态变化',{from,phase,round:this.round,submissions:this.submissions,reason:['failed','unknown','login-required'].includes(phase)?businessReason(message):undefined});
   }
   private bookable() {
     const a=this.state.activity;
@@ -90,16 +78,14 @@ export class Reservation {
     this.targetId=id;this.recovery=recovery;
     const g=++this.generation;
     this.diagnostics=new Diagnostics(recovery?.runId);
-    this.captchaSentAt=undefined;
     this.captchaReceivedAt=undefined;
-    this.ocrFinishedAt=undefined;
     this.lastSessionCheckAt=undefined;
     this.round=0;
     this.submissions=0;
     this.preparing=undefined;
     this.sessionChecking=false;
     this.expectedTickAt=undefined;
-    this.finalTimeObserved=false;
+    this.finalSessionChecked=false;
     this.state={phase:'loading',message:'正在获取活动信息',runId:this.diagnostics.run,verifyAfterLogin:recovery?.verify,preferred:recovery?.preferred??'online'};this.publish(this.state);
     this.diagnostics.record('log','打开任务',{activityId:id,recovered:Boolean(recovery),verifyOnly:Boolean(recovery?.verify)});
     if(recovery?.verify){this.set('unknown','恢复后先核验之前的提交结果');return;}
@@ -107,14 +93,11 @@ export class Reservation {
       const data=await this.stage('活动查询',()=>this.api.list());
       if(!this.valid(g))return;
       let activity=data.activities.find(a=>a.id===id);
-      this.recordClock(data.clock,'活动列表');
       if(!activity){
         const detail=await this.stage('活动详情查询',()=>this.api.detail(id));
         if(!this.valid(g))return;
         activity=detail.activity;
-        this.recordClock(detail.clock,'活动详情');
       }
-      if(!this.valid(g))return;
       let candidates:Activity[];
       if(recovery?.ids){
         candidates=[];
@@ -169,7 +152,7 @@ export class Reservation {
     if(!controls(this.state,this.now()).start || !this.bookable())return;
     this.nextSessionCheck=this.now()+60000;
     this.set('waiting','',{armed:true});
-    this.diagnostics.record('log','启动任务',{timingBasis:'local',submitDelayMs:SUBMIT_DELAY_MS,plannedLocalSubmitAt:new Date(this.state.activity!.startsAt+SUBMIT_DELAY_MS).toISOString(),leadSeconds:CAPTURE_LEAD_MS/1000,serverOffsetMs:this.state.clock?.offset,activityId:this.state.activity?.id,activityTitle:this.state.activity?.title,opensAt:this.state.activity?.startsAt,endsAt:this.state.activity?.endsAt,preferred:this.state.preferred,firstCandidate:this.state.candidates?.[0]?.id,secondCandidate:this.state.candidates?.[1]?.id});
+    this.diagnostics.record('log','启动任务',{timingBasis:'local',submitDelayMs:SUBMIT_DELAY_MS,plannedLocalSubmitAt:new Date(this.state.activity!.startsAt+SUBMIT_DELAY_MS).toISOString(),leadSeconds:CAPTURE_LEAD_MS/1000,activityId:this.state.activity?.id,activityTitle:this.state.activity?.title,opensAt:this.state.activity?.startsAt,endsAt:this.state.activity?.endsAt,preferred:this.state.preferred,firstCandidate:this.state.candidates?.[0]?.id,secondCandidate:this.state.candidates?.[1]?.id});
     this.tick();
   }
   private requireLogin() {
@@ -189,20 +172,16 @@ export class Reservation {
     if(!this.targetId || this.state.phase==='closed')return;
     this.set('unknown','恢复后先核验之前的提交结果',{armed:false});await this.verify();
   }
-  private async checkSession(final:boolean) {
+  private async checkSession() {
     const g=this.generation;
     try {
-      const result=await this.stage('等待期间登录检查',()=>this.api.detail(this.state.activity!.id));
-      if(!this.valid(g)||!this.state.armed)return;
+      await this.stage('等待期间登录检查',()=>this.api.detail(this.state.activity!.id),()=>this.round>0);
+      if(!this.valid(g)||!this.state.armed||this.round>0)return;
       this.lastSessionCheckAt=this.now();
-      if(this.round===0)this.recordClock(result.clock,final?'开放前最终观测':'周期保活');
-      else this.diagnostics.record('warn','时间观测结果未采纳',{reason:'已进入验证码准备',requestRttMs:result.clock.rttMs});
     }catch(error){
-      if(!this.valid(g)||!this.state.armed)return;
-      if(this.round>0)this.diagnostics.record('warn','登录检查结果未采纳',{reason:'已进入验证码准备',...errorInfo(error)});
-      else if(error instanceof ApiError && error.kind==='session')this.requireLogin();
+      if(!this.valid(g)||!this.state.armed||this.round>0)return;
+      if(error instanceof ApiError && error.kind==='session')this.requireLogin();
       else if(error instanceof ApiError && error.kind==='rate')this.stop(message(error));
-      else this.diagnostics.record('warn','登录检查未确认，保留原定时',{...errorInfo(error)});
     }finally{if(this.valid(g)){this.sessionChecking=false;if(this.state.armed && this.round===0)this.tick();}}
   }
   private tick=()=>{
@@ -212,12 +191,12 @@ export class Reservation {
     const remaining=this.state.activity!.startsAt-this.now();
     this.set(this.state.phase,this.state.message,{remaining:Math.max(0,remaining)});
     if(this.round===0 && !this.sessionChecking && remaining>CAPTURE_LEAD_MS){
-      const final=remaining<=40000&&!this.finalTimeObserved;
+      const final=remaining<=40000&&!this.finalSessionChecked;
       if(final || remaining>40000&&this.now()>=this.nextSessionCheck){
-        if(final)this.finalTimeObserved=true;
+        if(final)this.finalSessionChecked=true;
         this.nextSessionCheck=this.now()+60000;
         this.sessionChecking=true;
-        void this.checkSession(final);
+        void this.checkSession();
       }
     }
     if(this.round===0 && remaining<=CAPTURE_LEAD_MS)void this.loadCaptcha();
@@ -230,15 +209,14 @@ export class Reservation {
     if(!this.state.armed || this.state.phase!=='waiting' || !this.bookable())return;
     const g=this.generation,epoch=++this.ocrEpoch;
     ++this.round;
-    this.diagnostics.record('log','开始取图轮次',{round:this.round,plannedLocalCaptureAt:new Date(this.state.activity!.startsAt-CAPTURE_LEAD_MS).toISOString(),captureDelayMs:this.now()-this.state.activity!.startsAt+CAPTURE_LEAD_MS,serverOffsetMs:this.state.clock?.offset,afterOpenMs:this.now()-this.state.activity!.startsAt,ocrReady:this.state.ocrStatus==='ready',visibility:document.visibilityState});
+    this.diagnostics.record('log','开始取图轮次',{round:this.round,plannedLocalCaptureAt:new Date(this.state.activity!.startsAt-CAPTURE_LEAD_MS).toISOString(),captureDelayMs:this.now()-this.state.activity!.startsAt+CAPTURE_LEAD_MS,afterOpenMs:this.now()-this.state.activity!.startsAt,ocrReady:this.state.ocrStatus==='ready',visibility:document.visibilityState});
     this.set('captcha-loading','正在获取验证码',{code:''});
     for(let attempt=0;attempt<3;attempt++) {
       try {
-        this.captchaSentAt=this.now();this.captchaReceivedAt=undefined;this.ocrFinishedAt=undefined;
+        this.captchaReceivedAt=undefined;
         const image=await this.stage('验证码获取',()=>this.api.captcha());
         if(!this.valid(g)||epoch!==this.ocrEpoch||!this.bookable())return;
         this.captchaReceivedAt=this.now();
-        this.diagnostics.record('log','验证码到达',{round:this.round,requestAttempt:attempt+1,captchaSentAt:this.captchaSentAt,captchaReceivedAt:this.captchaReceivedAt});
         this.set('recognizing','正在识别验证码');
         void this.recognize(image,epoch);
         return;
@@ -261,15 +239,13 @@ export class Reservation {
     try {
       const code=(await this.stage('OCR识别',()=>this.ocr.recognize(image),()=>epoch!==this.ocrEpoch)).trim();
       if(!this.valid(g)||epoch!==this.ocrEpoch||!this.bookable())return;
-      this.ocrFinishedAt=this.now();
-      this.diagnostics.record('log','OCR输出检查',{round:this.round,length:code.length,valid:/^\d{4}$/.test(code),ocrFinishedAt:this.ocrFinishedAt});
-      if(!/^\d{4}$/.test(code)){await this.retryCaptcha();return;}
+      if(!/^\d{4}$/.test(code)){await this.retryCaptcha('OCR 输出不是四位数字');return;}
       this.set('prepared','',{code,ocrStatus:'ready'});
       if(this.now()>=this.state.activity!.startsAt+SUBMIT_DELAY_MS)await this.submit();
-    }catch{if(this.valid(g)&&epoch===this.ocrEpoch)await this.retryCaptcha();}
+    }catch{if(this.valid(g)&&epoch===this.ocrEpoch)await this.retryCaptcha('OCR 识别失败');}
   }
-  private async retryCaptcha() {
-    this.diagnostics.record('warn','验证码重试');
+  private async retryCaptcha(reason?:string) {
+    if(reason)this.diagnostics.record('warn','验证码重试',{reason,round:this.round});
     this.set('waiting','正在更新验证码',{code:''});
     await this.loadCaptcha();
   }
@@ -283,23 +259,13 @@ export class Reservation {
       priority:(this.state.candidateIndex??0)+1,
       attempt:this.submissions,
       afterOpenMs:this.now()-this.state.activity!.startsAt,
-      captchaSentAt:this.captchaSentAt,
-      captchaReceivedAt:this.captchaReceivedAt,
       captchaHeldMs:this.captchaReceivedAt===undefined?undefined:this.now()-this.captchaReceivedAt,
-      captchaRequestAgeMs:this.captchaSentAt===undefined?undefined:this.now()-this.captchaSentAt,
-      ocrWaitMs:this.ocrFinishedAt===undefined?undefined:this.now()-this.ocrFinishedAt,
-      lastSessionCheckAt:this.lastSessionCheckAt,
-      clockSampleAgeMs:this.state.clock?this.now()-this.state.clock.receivedAt:undefined,
-      clockRttMs:this.state.clock?.rttMs,
-      serverOffsetMs:this.state.clock?.offset,
-      timingBasis:'local',submitDelayMs:SUBMIT_DELAY_MS,
       dispatchLateMs:this.now()-this.state.activity!.startsAt-SUBMIT_DELAY_MS,
-      estimatedServerAfterOpenMs:this.state.clock?this.now()+this.state.clock.offset-this.state.activity!.startsAt:undefined,
       sessionCheckAgeMs:this.lastSessionCheckAt===undefined?undefined:this.now()-this.lastSessionCheckAt,
       visibility:document.visibilityState,
     });
     this.set('submitting','正在提交预约');
-    try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));this.diagnostics.record('log','服务端报告预约成功',{responseCode:0,responseData:1});}
+    try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));}
     catch(error){
       if(!this.valid(g))return;
       const reason=error instanceof ApiError && error.kind==='business'?businessReason(error.message):undefined;
@@ -308,7 +274,6 @@ export class Reservation {
         candidateMode:mode(this.state.activity!),
         priority:(this.state.candidateIndex??0)+1,
         attempt:this.submissions,
-        ...errorInfo(error),
         action,
       });
       if(error instanceof ApiError && error.kind==='session'){
@@ -341,7 +306,6 @@ export class Reservation {
         this.stop(error.message);return;
       }
       recordDecision('核验当前预约');
-      this.diagnostics.record('warn','提交结果不明，转入核验',errorInfo(error));
     }
     if(this.valid(g))await this.verify();
   }

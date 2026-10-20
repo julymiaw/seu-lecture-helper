@@ -1,4 +1,3 @@
-import type {ClockSample} from './clock';
 export const BASE = '/gsapp/sys/yddjzxxtjappseu/modules/hdyy/';
 export type Row = Record<string, unknown>;
 function diagnosticText(value:unknown,captcha?:string) {
@@ -39,8 +38,8 @@ function rows(value: unknown): Row[] {
   return value;
 }
 export interface ReservationApi {
-  list(): Promise<{activities: Activity[]; clock: ClockSample}>;
-  detail(id: string): Promise<{activity: Activity; clock: ClockSample}>;
+  list(): Promise<{activities: Activity[]}>;
+  detail(id: string): Promise<{activity: Activity}>;
   captcha(): Promise<string>;
   submit(id: string, code: string): Promise<void>;
   booked(id: string): Promise<boolean>;
@@ -78,27 +77,19 @@ export class Api implements ReservationApi {
       throw new ApiError(controller.signal.aborted ? '网络请求超时' : '网络连接失败', 'network', httpStatus);
     } finally { clearTimeout(timer); }
   }
-  private clockSample(value:unknown,startedAt:number):ClockSample {
-    const receivedAt=this.now(),rttMs=receivedAt-startedAt,serverTime=schoolTime(value);
-    return {serverTime,receivedAt,rttMs,offset:serverTime-(startedAt+receivedAt)/2};
-  }
   async list() {
-    const before = this.now();
     const data = await this.request('queryActivityList.do', {}) as Row;
-    const clock = this.clockSample(data.xtdqsj,before);
     const counts = new Map(rows(data.hdrsList ?? []).map(x => [String(x.HD_WID), x.YYRS]));
     const bookings = new Map(rows(data.xsxxList ?? []).map(x => [String(x.WID), x]));
     const unique = new Map(rows(data.hdlbList).map(row => [String(row.WID), row]));
-    return {clock, activities: [...unique.values()].map(row => activity({...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID))}))};
+    return {activities: [...unique.values()].map(row => activity({...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID))}))};
   }
   async detail(id: string) {
-    const before = this.now();
     const data = await this.request('getActivityDetail.do', {wid: id}) as Row;
-    const clock = this.clockSample(data?.xtdqsj,before);
     if (!data?.hdxq) throw new ApiError('未找到活动详情', 'format');
     const item = activity(data.hdxq as Row);
     if (item.id !== id) throw new ApiError('活动详情 ID 不匹配', 'format');
-    return {activity: item, clock};
+    return {activity: item};
   }
   async captcha() {
     const image = await this.request('vcode.do?_=' + this.now());

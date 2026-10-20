@@ -12,7 +12,7 @@ export async function sample(): Promise<Activity> {
 }
 export async function mockApi(overrides: Partial<ReservationApi> = {}) {
   const a = {...await sample(), reserved: false, startsAt: NOW - 1000};
-  return {list: vi.fn(async () => ({activities: [a], clock:clockSample()})), detail: vi.fn(async () => ({activity: a, clock:clockSample()})),
+  return {list: vi.fn(async () => ({activities: [a]})), detail: vi.fn(async () => ({activity: a})),
     captcha: vi.fn(async () => 'data:image/jpeg;base64,VEVTVA=='), submit: vi.fn(async () => {}), booked: vi.fn(async () => true), ...overrides};
 }
 export function deferred<T>() {let resolve!: (x: T) => void; let reject!: (x: unknown) => void; const promise = new Promise<T>((a,b) => {resolve=a; reject=b;}); return {promise,resolve,reject};}
@@ -27,5 +27,3 @@ export function trackedStorage() {
     removeItem:(key:string)=>{values.delete(key);},
   };
 }
-
-export const clockSample=(offset=0)=>({serverTime:Date.now()+offset,receivedAt:Date.now(),rttMs:0,offset});

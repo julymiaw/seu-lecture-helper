@@ -33,23 +33,22 @@ export class Diagnostics {
   readonly run:string;
   private seq=0;
   constructor(run?:string){this.run=run??this.id;}
-  private readonly started = performance.now();
   record(level: Level, event: string, fields: Fields = {}) {
-    const row={...fields,version:VERSION,run:this.run,task:this.id,seq:++this.seq,at:new Date().toISOString(),elapsedMs:Math.round(performance.now()-this.started),level,event};
+    const row={...fields,version:VERSION,run:this.run,task:this.id,seq:++this.seq,at:new Date().toISOString(),level,event};
     try{logStore.append(row);}catch{/* Optional diagnostics must never interrupt booking. */}
     try{console[level]('[SEU预约助手]',row);}catch{/* Console may be unavailable. */}
     if(event==='状态变化' && ['success','failed','unknown','login-required','closed'].includes(String(fields.phase)))void logStore.flush();
   }
 
   async measure<T>(stage: string, operation: () => Promise<T>, fields: Fields = {}, stale = () => false): Promise<T> {
-    this.record('log', stage + '开始', fields);
+    if(stage==='预约提交')this.record('log', stage + '开始', fields);
     const started = performance.now();
     try {
       const result = await operation();
-      this.record('log', stage + '完成', {...fields, durationMs: Math.round(performance.now() - started), stale: stale()});
+      this.record('log', stage + '完成', {...fields, durationMs: Math.round(performance.now() - started), ...(stale()?{stale:true}:{})});
       return result;
     } catch (error) {
-      this.record(failureLevel(error), stage + '失败', {...fields, durationMs: Math.round(performance.now() - started), stale: stale(), ...errorInfo(error)});
+      this.record(failureLevel(error), stage + '失败', {...fields, durationMs: Math.round(performance.now() - started), ...(stale()?{stale:true}:{}), ...errorInfo(error)});
       throw error;
     }
   }

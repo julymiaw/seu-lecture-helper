@@ -1,9 +1,10 @@
 import type {State, Recovery} from './reservation';
 const KEY = 'seu-lecture-pending-task';
 export interface PendingTask extends Recovery {id: string; endsAt: number; version?: 2}
-export function saveTask(state: State, storage: Storage = sessionStorage) {
+export function saveTask(state: State, storage?: Storage) {
   if (['loading', 'ready', 'closed'].includes(state.phase)) return;
   try {
+    storage ??= sessionStorage;
     if (state.phase === 'success') {storage.removeItem(KEY); return;}
     if (!state.activity) return;
     if (state.phase === 'failed') {storage.removeItem(KEY); return;}
@@ -25,8 +26,9 @@ export function saveTask(state: State, storage: Storage = sessionStorage) {
     }
   } catch { /* Recovery storage is optional; never block the active task. */ }
 }
-export function readTask(storage: Storage = sessionStorage): PendingTask | undefined {
+export function readTask(storage?: Storage): PendingTask | undefined {
   try {
+    storage ??= sessionStorage;
     const task = JSON.parse(storage.getItem(KEY) ?? 'null');
     if (task && typeof task.id === 'string'
       && (task.runId === undefined || typeof task.runId === 'string' && task.runId.length > 0 && task.runId.length <= 150)
@@ -43,4 +45,4 @@ export function readTask(storage: Storage = sessionStorage): PendingTask | undef
     storage.removeItem(KEY);
   } catch {}
 }
-export function clearTask(storage: Storage = sessionStorage) {try {storage.removeItem(KEY);} catch {}}
+export function clearTask(storage?: Storage) {try {(storage ?? sessionStorage).removeItem(KEY);} catch {}}
