@@ -1,3 +1,4 @@
+import {clockSample} from './helpers';
 import {expect, it, vi} from 'vitest';
 import {Diagnostics, VERSION} from '../src/diagnostics';
 const engine=()=>({prepare:async()=>{},recognize:async()=> '0733'});
@@ -32,6 +33,7 @@ it('does not let broken console instrumentation interrupt operations', async () 
 it('traces a complete reservation without exposing captcha data', async () => {
   const {Reservation} = await import('../src/reservation');
   const {mockApi, NOW, sample} = await import('./helpers');
+  vi.useFakeTimers();vi.setSystemTime(NOW);
   const api = await mockApi(); const task = new Reservation(api, vi.fn(), () => NOW,engine());
   await task.open((await sample()).id); task.start();
   for (let i = 0; i < 60; i++) await Promise.resolve();
@@ -47,7 +49,7 @@ it('does not log each countdown tick', async () => {
   const {mockApi, NOW, sample} = await import('./helpers');
   vi.setSystemTime(NOW);
   const a = {...await sample(), reserved:false, startsAt:NOW+10000};
-  const api = await mockApi({list:vi.fn(async () => ({activities:[a], offset:0}))});
+  const api = await mockApi({list:vi.fn(async () => ({activities:[a], clock:clockSample()}))});
   const task = new Reservation(api,vi.fn(),Date.now,engine()); await task.open(a.id); task.start();
   for(let i=0;i<60;i++)await Promise.resolve();
   const before = vi.mocked(console.log).mock.calls.length;
@@ -77,17 +79,17 @@ it('uses warnings for expected API failures and errors for malformed or unexpect
 it('opening a full activity reports a business warning without a console error',async()=>{
   const {Reservation}=await import('../src/reservation');const {mockApi,sample,NOW}=await import('./helpers');
   const activity={...await sample(),reserved:false,count:5000,capacity:5000,countKnown:true};
-  const api=await mockApi({list:vi.fn(async()=>({activities:[activity],offset:0}))});
+  const api=await mockApi({list:vi.fn(async()=>({activities:[activity],clock:clockSample()}))});
   const task=new Reservation(api,vi.fn(),()=>NOW,engine());await task.open(activity.id);
   expect(task.state.phase).toBe('failed');expect(console.error).not.toHaveBeenCalled();
   expect(vi.mocked(console.warn).mock.calls.some(call=>call[1]?.event==='状态变化' && call[1]?.reason==='full')).toBe(true);
 });
 it('records captcha holding time, OCR wait and last successful session check at submission',async()=>{
   vi.useFakeTimers();const {Reservation}=await import('../src/reservation');const {mockApi,NOW,sample}=await import('./helpers');vi.setSystemTime(NOW);
-  const activity={...await sample(),reserved:false,startsAt:NOW+180000},api=await mockApi({list:vi.fn(async()=>({activities:[activity],offset:0}))});
+  const activity={...await sample(),reserved:false,startsAt:NOW+180000},api=await mockApi({list:vi.fn(async()=>({activities:[activity],clock:clockSample()}))});
   const task=new Reservation(api,vi.fn(),Date.now,engine());await task.open(activity.id);task.start();await vi.advanceTimersByTimeAsync(180000);
   const logs=vi.mocked(console.log).mock.calls.map(call=>call[1]),submit=logs.find(e=>e.event==='提交时机');
-  expect(submit).toMatchObject({captchaHeldMs:30000,captchaRequestAgeMs:30000,ocrWaitMs:30000,lastSessionCheckAt:NOW+120000,sessionCheckAgeMs:60000,afterOpenMs:0});
+  expect(submit).toMatchObject({captchaHeldMs:30000,captchaRequestAgeMs:30000,ocrWaitMs:30000,lastSessionCheckAt:NOW+140000,sessionCheckAgeMs:40000,afterOpenMs:0});
   expect(logs.find(e=>e.event==='验证码到达')).toMatchObject({round:1,requestAttempt:1,captchaReceivedAt:NOW+150000});expect(task.state.phase).toBe('success');
 });
 it('keeps a stable run ID across recovery while each execution has its own task ID',async()=>{

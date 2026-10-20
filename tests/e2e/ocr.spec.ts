@@ -12,7 +12,7 @@ body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-cont
 async function setup(page:Page, options:{expireSubmitOnce?:boolean;resumeStatus?:number;failResumeOnce?:boolean;bookedInitially?:boolean;pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
   const initialTime=Date.now();
   let resumeFailures=0,expiredWrite=false;
-  let booked=Boolean(options.bookedInitially),bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,assetCalls=0;
+  let booked=Boolean(options.bookedInitially),bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,detailCalls=0,assetCalls=0;
   const targets:string[]=[];const events:string[]=[];
   const codes:string[]=[];
   const failures:string[]=[];
@@ -37,8 +37,14 @@ async function setup(page:Page, options:{expireSubmitOnce?:boolean;resumeStatus?
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(options.pair){const first=data.datas.hdlbList[0];first.JZMC=options.unlabelled?'【艺术】同一讲座':'【线上】【艺术】同一讲座';first.JZDD='腾讯会议';const second={...first,WID:'offline-fixture',JZMC:options.unlabelled?'【艺术】同一讲座':'【线下】【艺术】同一讲座',JZDD:'九龙湖报告厅'};data.datas.hdlbList=[first,second];data.datas.hdrsList=[{HD_WID:first.WID,YYRS:0},{HD_WID:second.WID,YYRS:0}];}
-    if(name==='queryActivityList.do') {if(options.failResumeOnce&&captchaCalls>0&&resumeFailures++===0)return route.fulfill({status:options.resumeStatus??401,body:'unavailable'});result=data;}
-    else if(name==='vcode.do') {captchaCalls++;events.push('captcha');if(options.expireBackupOnce&&captchaCalls===2)return route.fulfill({status:401,body:'unauthorized'});if(options.expireProbeOnce&&captchaCalls===1)return route.fulfill({status:401,body:'unauthorized'});result={code:0,datas:image};}
+    if(name==='queryActivityList.do') {if(options.failResumeOnce&&(captchaCalls>0||detailCalls>0)&&resumeFailures++===0)return route.fulfill({status:options.resumeStatus??401,body:'unavailable'});result=data;}
+    else if(name==='getActivityDetail.do') {
+      detailCalls++;events.push('detail');
+      if(options.expireProbeOnce&&detailCalls===1)return route.fulfill({status:401,body:'unauthorized'});
+      const id=new URLSearchParams(request.postData()!).get('wid');
+      result={code:0,datas:{xtdqsj:data.datas.xtdqsj,hdxq:data.datas.hdlbList.find((row:{WID:string})=>row.WID===id)}};
+    }
+    else if(name==='vcode.do') {captchaCalls++;events.push('captcha');if(options.expireBackupOnce&&captchaCalls===2)return route.fulfill({status:401,body:'unauthorized'});result={code:0,datas:image};}
     else if(name==='addReservation.do') {
       writes++;const target=new URLSearchParams(request.postData()!).get('wid')!;targets.push(target);events.push('submit:'+target);codes.push(new URLSearchParams(request.postData()!).get('vcode')!);
       if(options.expireSubmitOnce&&!expiredWrite&&(!options.pair||target==='offline-fixture')){expiredWrite=true;booked=true;bookedId=target;return route.fulfill({status:401,body:'unauthorized'});}
@@ -63,7 +69,7 @@ async function setup(page:Page, options:{expireSubmitOnce?:boolean;resumeStatus?
     const other=card.cloneNode(true) as HTMLElement;other.querySelector('.activity-name')!.textContent=unlabelled?'【艺术】同一讲座':'【线下】【艺术】同一讲座';other.querySelectorAll('.activity-text')[2].querySelector('div')!.textContent='九龙湖报告厅';Object.assign(other,{__vue__:{$props:{item:{WID:'offline-fixture'}}}});card.after(other);
   },options.unlabelled??false);
   await page.addScriptTag({content:script});
-  return {targets,events,writes:()=>writes,captchaCalls:()=>captchaCalls,assetCalls:()=>assetCalls,codes,failures};
+  return {targets,events,writes:()=>writes,captchaCalls:()=>captchaCalls,detailCalls:()=>detailCalls,assetCalls:()=>assetCalls,codes,failures};
 }
 
 const progress=(page:Page)=>page.locator('#candidates li[data-current="true"] .candidate-status:visible, #status:visible');
@@ -260,4 +266,14 @@ test('single candidate has the same row-based progress and no duplicate status o
   await page.locator('#start').click();await expect(progress(page)).toHaveText('等待开放');await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3571000);await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','prepared',{timeout:20000});
   await expect(progress(page)).toHaveText('等待开放');await expect(page.locator('#status')).toBeHidden();await expect(page.locator('#failure, #preparation, #labels, select')).toHaveCount(0);await page.clock.fastForward(30000);await expect(progress(page)).toHaveText('预约成功');expect(state.writes()).toBe(1);
   const aligned=await page.locator('.actions').evaluate(el=>{const a=el.getBoundingClientRect(),exportButton=el.querySelector('#export')!.getBoundingClientRect(),close=el.querySelector('#close')!.getBoundingClientRect();return Math.abs(exportButton.left-a.left)<1&&Math.abs(close.right-a.right)<1;});expect(aligned).toBe(true);
+});
+test('final detail calibration precedes captcha preparation and changing the system clock cannot trigger an early submit',async({page})=>{
+  await page.clock.install();const state=await setup(page,{future:true});await openHelper(page);await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
+  await page.clock.fastForward(3560500);await expect.poll(state.detailCalls).toBe(1);expect(state.captchaCalls()).toBe(0);
+  await page.clock.fastForward(10000);await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','prepared',{timeout:20000});
+  const localTime=await page.evaluate(()=>Date.now());await page.clock.setSystemTime(localTime+3600000);
+  await page.clock.fastForward(1000);expect(state.writes()).toBe(0);expect(state.detailCalls()).toBe(1);
+  await page.clock.fastForward(30000);await expect(progress(page)).toContainText('预约成功');
+  expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);expect(state.detailCalls()).toBe(1);expect(state.failures).toEqual([]);
 });

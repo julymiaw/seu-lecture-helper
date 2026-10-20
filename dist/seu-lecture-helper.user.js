@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.3
+// @version      0.7.4
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -99,10 +99,11 @@ SOFTWARE.
     return value;
   }
   var Api = class {
-    constructor(transport = (input, init) => fetch(input, init), now = Date.now, timeout = 15e3) {
+    constructor(transport = (input, init) => fetch(input, init), now = Date.now, timeout = 15e3, monotonic = () => performance.now()) {
       this.transport = transport;
       this.now = now;
       this.timeout = timeout;
+      this.monotonic = monotonic;
     }
     async request(name, data) {
       const controller = new AbortController();
@@ -145,22 +146,27 @@ SOFTWARE.
         clearTimeout(timer);
       }
     }
+    clockSample(value, startedAt) {
+      const receivedAt = this.monotonic(), rttMs = receivedAt - startedAt, serverTime = schoolTime(value);
+      return { serverTime, receivedAt, rttMs, offset: serverTime + rttMs / 2 - this.now() };
+    }
     async list() {
-      const before = this.now();
+      const before = this.monotonic();
       const data = await this.request("queryActivityList.do", {});
-      const offset = schoolTime(data.xtdqsj) - (before + this.now()) / 2;
+      const clock = this.clockSample(data.xtdqsj, before);
       const counts = new Map(rows(data.hdrsList ?? []).map((x) => [String(x.HD_WID), x.YYRS]));
       const bookings = new Map(rows(data.xsxxList ?? []).map((x) => [String(x.WID), x]));
       const unique = new Map(rows(data.hdlbList).map((row) => [String(row.WID), row]));
-      return { offset, activities: [...unique.values()].map((row) => activity({ ...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID)) })) };
+      return { clock, activities: [...unique.values()].map((row) => activity({ ...row, ...bookings.get(String(row.WID)), YYRS: counts.get(String(row.WID)) })) };
     }
     async detail(id) {
-      const before = this.now();
+      const before = this.monotonic();
       const data = await this.request("getActivityDetail.do", { wid: id });
+      const clock = this.clockSample(data?.xtdqsj, before);
       if (!data?.hdxq) throw new ApiError("\u672A\u627E\u5230\u6D3B\u52A8\u8BE6\u60C5", "format");
       const item = activity(data.hdxq);
       if (item.id !== id) throw new ApiError("\u6D3B\u52A8\u8BE6\u60C5 ID \u4E0D\u5339\u914D", "format");
-      return { activity: item, offset: schoolTime(data.xtdqsj) - (before + this.now()) / 2 };
+      return { activity: item, clock };
     }
     async captcha() {
       const image = await this.request("vcode.do?_=" + this.now());
@@ -178,7 +184,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.3";
+  var version = "0.7.4";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -387,6 +393,12 @@ SOFTWARE.
     }
   };
 
+  // src/clock.ts
+  var MAX_CLOCK_RTT_MS = 2e3;
+  function serverNow(sample, monotonic = performance.now()) {
+    return sample ? sample.serverTime + sample.rttMs / 2 + monotonic - sample.receivedAt : Date.now();
+  }
+
   // src/candidates.ts
   function parseTitle(title) {
     const first = /^\s*[【\[]([^】\]]+)[】\]]\s*(.*)$/s.exec(title);
@@ -421,20 +433,21 @@ SOFTWARE.
     const a = state.activity;
     return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);
   }
-  function controls(state, now = Date.now()) {
-    const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now + (state.offset ?? 0) < a.endsAt && (!fullCapacity(state) || (state.candidates?.length ?? 0) > 1));
+  function controls(state, now = serverNow(state.clock)) {
+    const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now < a.endsAt && (!fullCapacity(state) || (state.candidates?.length ?? 0) > 1));
     return {
       start: active && state.phase === "ready" && Boolean(classified(state.candidates ?? (a ? [a] : []))),
-      submit: active && state.phase === "prepared" && now + (state.offset ?? 0) >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
+      submit: active && state.phase === "prepared" && now >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
       close: !["submitting", "verifying"].includes(state.phase)
     };
   }
   var Reservation = class {
-    constructor(api, publish, now = Date.now, ocr) {
+    constructor(api, publish, now = Date.now, ocr, monotonic = () => performance.now()) {
       this.api = api;
       this.publish = publish;
       this.now = now;
       this.ocr = ocr;
+      this.monotonic = monotonic;
     }
     state = { phase: "closed", message: "" };
     generation = 0;
@@ -450,13 +463,33 @@ SOFTWARE.
     nextSessionCheck = 0;
     sessionChecking = false;
     expectedTickAt;
+    finalClockChecked = false;
     diagnostics = new Diagnostics();
     captchaSentAt;
     captchaReceivedAt;
     ocrFinishedAt;
     lastSessionCheckAt;
+    observe() {
+      return { wall: this.now(), mono: this.monotonic() };
+    }
     serverNow() {
-      return this.now() + (this.state.offset ?? 0);
+      return serverNow(this.state.clock, this.monotonic());
+    }
+    calibrate(sample, source) {
+      const previous = this.state.clock;
+      const accepted = !previous || sample.rttMs <= MAX_CLOCK_RTT_MS;
+      const correction = previous ? serverNow(sample, this.monotonic()) - this.serverNow() : void 0;
+      if (accepted) this.state = { ...this.state, clock: sample };
+      this.diagnostics.record(accepted && sample.rttMs <= MAX_CLOCK_RTT_MS ? "log" : "warn", "\u670D\u52A1\u5668\u6821\u65F6", {
+        source,
+        serverTime: new Date(sample.serverTime).toISOString(),
+        requestRttMs: sample.rttMs,
+        serverOffsetMs: sample.offset,
+        previousOffsetMs: previous?.offset,
+        correctionMs: correction,
+        accepted,
+        initialSlowSample: !previous && sample.rttMs > MAX_CLOCK_RTT_MS
+      });
     }
     valid(g) {
       return g === this.generation && this.state.phase !== "closed";
@@ -524,6 +557,7 @@ SOFTWARE.
       this.preparing = void 0;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
+      this.finalClockChecked = false;
       this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", runId: this.diagnostics.run, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online" };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id, recovered: Boolean(recovery), verifyOnly: Boolean(recovery?.verify) });
@@ -534,11 +568,13 @@ SOFTWARE.
       try {
         const data = await this.stage("\u6D3B\u52A8\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
-        let activity2 = data.activities.find((a) => a.id === id), offset = data.offset;
+        let activity2 = data.activities.find((a) => a.id === id);
+        this.calibrate(data.clock, "\u6D3B\u52A8\u5217\u8868");
         if (!activity2) {
           const detail = await this.stage("\u6D3B\u52A8\u8BE6\u60C5\u67E5\u8BE2", () => this.api.detail(id));
+          if (!this.valid(g)) return;
           activity2 = detail.activity;
-          offset = detail.offset;
+          this.calibrate(detail.clock, "\u6D3B\u52A8\u8BE6\u60C5");
         }
         if (!this.valid(g)) return;
         let candidates;
@@ -568,7 +604,7 @@ SOFTWARE.
           }
         }
         this.targetId = activity2.id;
-        this.state = { ...this.state, activity: activity2, offset, candidates, candidateIndex: index, fullIds: candidates.length > 1 ? recovery?.ids?.slice(0, index) ?? [] : [] };
+        this.state = { ...this.state, activity: activity2, candidates, candidateIndex: index, fullIds: candidates.length > 1 ? recovery?.ids?.slice(0, index) ?? [] : [] };
         if (bookedIndex >= 0) {
           this.finish("success", "\u8BE5\u8BB2\u5EA7\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55\uFF0C\u4E0D\u518D\u9884\u7EA6\u53E6\u4E00\u573A\u6B21");
           return;
@@ -624,10 +660,10 @@ SOFTWARE.
       return true;
     }
     start() {
-      if (!controls(this.state, this.now()).start || !this.bookable()) return;
-      this.nextSessionCheck = this.now() + 6e4;
+      if (!controls(this.state, this.serverNow()).start || !this.bookable()) return;
+      this.nextSessionCheck = this.monotonic() + 6e4;
       this.set("waiting", "", { armed: true });
-      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: CAPTURE_LEAD_MS / 1e3, serverOffsetMs: this.state.offset, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
+      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: CAPTURE_LEAD_MS / 1e3, serverOffsetMs: this.state.clock?.offset, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
       this.tick();
     }
     requireLogin() {
@@ -656,14 +692,18 @@ SOFTWARE.
       this.set("unknown", "\u6062\u590D\u540E\u5148\u6838\u9A8C\u4E4B\u524D\u7684\u63D0\u4EA4\u7ED3\u679C", { armed: false });
       await this.verify();
     }
-    async checkSession() {
+    async checkSession(final) {
       const g = this.generation;
       try {
-        await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.captcha());
-        if (this.valid(g)) this.lastSessionCheckAt = this.now();
+        const result = await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.detail(this.state.activity.id));
+        if (!this.valid(g) || !this.state.armed) return;
+        this.lastSessionCheckAt = this.observe();
+        if (this.round === 0) this.calibrate(result.clock, final ? "\u5F00\u653E\u524D\u6700\u7EC8\u6821\u65F6" : "\u5468\u671F\u4FDD\u6D3B");
+        else this.diagnostics.record("warn", "\u6821\u65F6\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", requestRttMs: result.clock.rttMs });
       } catch (error) {
-        if (!this.valid(g)) return;
-        if (error instanceof ApiError && error.kind === "session") this.requireLogin();
+        if (!this.valid(g) || !this.state.armed) return;
+        if (this.round > 0) this.diagnostics.record("warn", "\u767B\u5F55\u68C0\u67E5\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", ...errorInfo(error) });
+        else if (error instanceof ApiError && error.kind === "session") this.requireLogin();
         else if (error instanceof ApiError && error.kind === "rate") this.stop(message(error));
         else this.diagnostics.record("warn", "\u767B\u5F55\u68C0\u67E5\u672A\u786E\u8BA4\uFF0C\u4FDD\u7559\u539F\u5B9A\u65F6", { ...errorInfo(error) });
       } finally {
@@ -675,39 +715,43 @@ SOFTWARE.
     }
     tick = () => {
       clearTimeout(this.timer);
-      if (this.expectedTickAt !== void 0 && this.now() - this.expectedTickAt > 1e3) this.diagnostics.record("warn", "\u8BA1\u65F6\u56DE\u8C03\u5EF6\u8FDF", { delayMs: this.now() - this.expectedTickAt, visibility: document.visibilityState });
+      if (this.expectedTickAt !== void 0 && this.monotonic() - this.expectedTickAt > 1e3) this.diagnostics.record("warn", "\u8BA1\u65F6\u56DE\u8C03\u5EF6\u8FDF", { delayMs: this.monotonic() - this.expectedTickAt, visibility: document.visibilityState });
       if (!this.state.armed || !this.bookable()) return;
       const remaining = this.state.activity.startsAt - this.serverNow();
       this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
-      if (this.round === 0 && !this.sessionChecking && this.now() >= this.nextSessionCheck && remaining > CAPTURE_LEAD_MS + 2e4) {
-        this.nextSessionCheck = this.now() + 6e4;
-        this.sessionChecking = true;
-        void this.checkSession();
+      if (this.round === 0 && !this.sessionChecking && remaining > CAPTURE_LEAD_MS) {
+        const final = remaining <= 4e4 && !this.finalClockChecked;
+        if (final || remaining > 4e4 && this.monotonic() >= this.nextSessionCheck) {
+          if (final) this.finalClockChecked = true;
+          this.nextSessionCheck = this.monotonic() + 6e4;
+          this.sessionChecking = true;
+          void this.checkSession(final);
+        }
       }
-      if (this.round === 0 && !this.sessionChecking && remaining <= CAPTURE_LEAD_MS) void this.loadCaptcha();
+      if (this.round === 0 && remaining <= CAPTURE_LEAD_MS) void this.loadCaptcha();
       if (remaining <= 0) {
-        if (controls(this.state, this.now()).submit) void this.submit();
+        if (controls(this.state, this.serverNow()).submit) void this.submit();
         return;
       }
       const delay = Math.min(250, remaining);
-      this.expectedTickAt = this.now() + delay;
+      this.expectedTickAt = this.monotonic() + delay;
       this.timer = setTimeout(this.tick, delay);
     };
     async loadCaptcha() {
       if (!this.state.armed || this.state.phase !== "waiting" || !this.bookable()) return;
       const g = this.generation, epoch = ++this.ocrEpoch;
       ++this.round;
-      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedCaptureAt: new Date(this.state.activity.startsAt - (this.state.offset ?? 0) - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + CAPTURE_LEAD_MS, serverOffsetMs: this.state.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedServerCaptureAt: new Date(this.state.activity.startsAt - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + CAPTURE_LEAD_MS, serverOffsetMs: this.state.clock?.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          this.captchaSentAt = this.now();
+          this.captchaSentAt = this.observe();
           this.captchaReceivedAt = void 0;
           this.ocrFinishedAt = void 0;
           const image = await this.stage("\u9A8C\u8BC1\u7801\u83B7\u53D6", () => this.api.captcha());
           if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
-          this.captchaReceivedAt = this.now();
-          this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u5230\u8FBE", { round: this.round, requestAttempt: attempt + 1, captchaSentAt: this.captchaSentAt, captchaReceivedAt: this.captchaReceivedAt });
+          this.captchaReceivedAt = this.observe();
+          this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u5230\u8FBE", { round: this.round, requestAttempt: attempt + 1, captchaSentAt: this.captchaSentAt?.wall, captchaReceivedAt: this.captchaReceivedAt?.wall });
           this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801");
           void this.recognize(image, epoch);
           return;
@@ -742,8 +786,8 @@ SOFTWARE.
       try {
         const code = (await this.stage("OCR\u8BC6\u522B", () => this.ocr.recognize(image), () => epoch !== this.ocrEpoch)).trim();
         if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
-        this.ocrFinishedAt = this.now();
-        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, length: code.length, valid: /^\d{4}$/.test(code), ocrFinishedAt: this.ocrFinishedAt });
+        this.ocrFinishedAt = this.observe();
+        this.diagnostics.record("log", "OCR\u8F93\u51FA\u68C0\u67E5", { round: this.round, length: code.length, valid: /^\d{4}$/.test(code), ocrFinishedAt: this.ocrFinishedAt?.wall });
         if (!/^\d{4}$/.test(code)) {
           await this.retryCaptcha();
           return;
@@ -760,7 +804,7 @@ SOFTWARE.
       await this.loadCaptcha();
     }
     async submit() {
-      if (!this.bookable() || !controls(this.state, this.now()).submit) return;
+      if (!this.bookable() || !controls(this.state, this.serverNow()).submit) return;
       const code = this.state.code.trim();
       ++this.ocrEpoch;
       clearTimeout(this.timer);
@@ -771,13 +815,16 @@ SOFTWARE.
         priority: (this.state.candidateIndex ?? 0) + 1,
         attempt: this.submissions,
         afterOpenMs: this.serverNow() - this.state.activity.startsAt,
-        captchaSentAt: this.captchaSentAt,
-        captchaReceivedAt: this.captchaReceivedAt,
-        captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.now() - this.captchaReceivedAt,
-        captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.now() - this.captchaSentAt,
-        ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.now() - this.ocrFinishedAt,
-        lastSessionCheckAt: this.lastSessionCheckAt,
-        sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.now() - this.lastSessionCheckAt,
+        captchaSentAt: this.captchaSentAt?.wall,
+        captchaReceivedAt: this.captchaReceivedAt?.wall,
+        captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.monotonic() - this.captchaReceivedAt.mono,
+        captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.monotonic() - this.captchaSentAt.mono,
+        ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.monotonic() - this.ocrFinishedAt.mono,
+        lastSessionCheckAt: this.lastSessionCheckAt?.wall,
+        clockSampleAgeMs: this.state.clock ? this.monotonic() - this.state.clock.receivedAt : void 0,
+        clockRttMs: this.state.clock?.rttMs,
+        serverOffsetMs: this.serverNow() - this.now(),
+        sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.monotonic() - this.lastSessionCheckAt.mono,
         visibility: document.visibilityState
       });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
@@ -875,7 +922,7 @@ SOFTWARE.
       if (this.valid(g)) this.finish("unknown", "\u7ED3\u679C\u5F85\u786E\u8BA4\uFF1A" + detail + "\u3002\u8BF7\u91CD\u65B0\u6838\u9A8C\uFF0C\u4E0D\u8981\u76F4\u63A5\u91CD\u590D\u63D0\u4EA4\u3002");
     }
     close() {
-      if (!controls(this.state, this.now()).close) return false;
+      if (!controls(this.state, this.serverNow()).close) return false;
       ++this.generation;
       ++this.ocrEpoch;
       clearTimeout(this.timer);
@@ -1070,14 +1117,14 @@ button:disabled{opacity:.5;cursor:default}
       this.get("#status").hidden = !standalone || !progress(state);
       this.get("#status").textContent = standalone ? progress(state) : "";
       this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "prepared"].includes(state.phase);
-      this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? Date.now()) - Date.now() - (state.offset ?? 0)));
+      this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? serverNow(state.clock)) - serverNow(state.clock)));
       this.get("#export").hidden = choosing;
       this.get("#export").disabled = this.exporting || ["submitting", "verifying"].includes(state.phase);
       this.host.dataset.ocr = state.ocrStatus;
       this.host.dataset.phase = state.phase;
       this.get("#start").hidden = state.phase !== "ready";
       this.get("#start").disabled = !allowed.start;
-      this.get("#start").textContent = (state.activity?.startsAt ?? 0) > Date.now() + (state.offset ?? 0) ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
+      this.get("#start").textContent = (state.activity?.startsAt ?? 0) > serverNow(state.clock) ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
       this.get("#login").hidden = state.phase !== "login-required";
       this.get("#resume").hidden = state.phase !== "login-required";
       this.get("#verify").hidden = state.phase !== "unknown";

@@ -17,8 +17,11 @@ JSON 包含 schema、导出时间及各运行的 summary、segments、events 和
 - 活动查询、OCR 预热、取图、识别、提交及预约记录核验的开始、完成或失败与耗时；迟到结果用 `stale` 标识。
 - 取图轮次 `round`、本轮网络重试 `requestAttempt`，取图请求与图片收到时间；OCR 完成时间与输出长度和格式，不含答案。
 - 提交时的 `captchaHeldMs`（图片收到至提交）、`captchaRequestAgeMs`（取图请求开始至提交）、`ocrWaitMs`（识别完成至提交）、`lastSessionCheckAt` 和 `sessionCheckAgeMs`；未进行会话检查时相关字段缺省。
+- 校时响应的服务器时间、`requestRttMs`、新旧偏移、`correctionMs` 和 `accepted`；提交时记录 `clockSampleAgeMs`、`clockRttMs` 与当时本机偏移。开放时刻仍是估算值，不代表服务器收到请求的时间。
 - 取图和提交相对开放时间、超过一秒的计时回调延迟与关键时刻的标签页可见性。
 - 可取得的 HTTP 和业务错误码、安全处理后的业务文案、失败分类、重试与候选切换决定、核验结果和最终状态。
+
+图片持有、请求年龄、OCR 等待和会话检查年龄使用单调时间差，系统时间调整不会改变这些耗时。`at` 与各 `*At` 日志时间戳仍采用本机墙上时间；`plannedServerCaptureAt` 则表示按服务器开放时间推算的取图时刻。校时基准仅在当前页面内有效。
 
 正常进度用 log；已处理的业务、网络、认证和限流失败用 warn；格式变化与未预期程序异常用 error。不逐秒记录倒计时或页面重绘，不保存登录凭据、验证码图或答案、完整请求头或任意响应对象。相邻阶段失败与处理决定分别用于耗时和动作分析。
 

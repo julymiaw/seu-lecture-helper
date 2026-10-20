@@ -10,8 +10,8 @@ import {clone, envelope, NOW, response} from './helpers';
 describe('protocol and samples', () => {
   it('merges by ID, handles mixed numeric fields, preserves distinct events', async () => {
     const fetcher = vi.fn(async () => response(raw));
-    const result = await new Api(fetcher, () => NOW).list();
-    expect(result.offset).toBe(0); expect(result.activities).toHaveLength(6);
+    const result = await new Api(fetcher, () => NOW,15000,()=>0).list();
+    expect(result.clock.offset).toBeCloseTo(0,0); expect(result.activities).toHaveLength(6);
     expect(result.activities[0]).toMatchObject({count: 626, capacity: 5000, reserved: true});
     expect(result.activities[1].reserved).toBe(false);
     expect(result.activities[2].id).not.toBe(result.activities[3].id);
@@ -19,8 +19,9 @@ describe('protocol and samples', () => {
     expect(url).toBe(BASE + 'queryActivityList.do'); expect(init).toMatchObject({method:'POST', body:'', credentials:'same-origin'});
   });
   it('estimates clock offset from request midpoint', async () => {
-    const times = vi.fn().mockReturnValueOnce(NOW - 2000).mockReturnValueOnce(NOW);
-    expect((await new Api(vi.fn(async () => response(raw)), times).list()).offset).toBe(1000);
+    const monotonic=vi.fn().mockReturnValueOnce(0).mockReturnValueOnce(2000);
+    const result=await new Api(vi.fn(async()=>response(raw)),()=>NOW,15000,monotonic).list();
+    expect(result.clock).toEqual({serverTime:NOW,receivedAt:2000,rttMs:2000,offset:1000});
   });
   it('uses timestamp GET for captcha and preserves MIME', async () => {
     const transport = vi.fn(async () => response(envelope('data:image/jpeg;base64,VEVTVA==')));
