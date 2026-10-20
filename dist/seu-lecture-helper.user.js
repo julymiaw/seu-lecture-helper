@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.7
+// @version      0.7.8
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -183,7 +183,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.7";
+  var version = "0.7.8";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -1167,11 +1167,9 @@ button:disabled{opacity:.5;cursor:default}
     return true;
   }
   var Mount = class {
-    constructor(api, open, routeChange = () => {
-    }) {
+    constructor(api, open) {
       this.api = api;
       this.open = open;
-      this.routeChange = routeChange;
     }
     items = [];
     reservationUpdates = /* @__PURE__ */ new Map();
@@ -1181,7 +1179,6 @@ button:disabled{opacity:.5;cursor:default}
     epoch = 0;
     stopped = false;
     route = () => {
-      this.routeChange();
       this.remove();
       this.items = [];
       void this.load();
@@ -4231,7 +4228,7 @@ button:disabled{opacity:.5;cursor:default}
     }
     const mount = new Mount(api, (id) => {
       void open(id);
-    }, () => close());
+    });
     mount.start();
     const pending = readTask();
     if (pending) void open(pending.id, pending);

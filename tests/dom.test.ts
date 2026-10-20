@@ -70,10 +70,10 @@ describe('mounting', () => {
   });
   it('handles detail IDs, route changes, DOM replacement and cleanup', async () => {
     document.body.innerHTML=fixture('detail.html'); history.replaceState(null,'','/#/hdxq?WID=detail-id');
-    const open=vi.fn(), route=vi.fn(); const mount=new Mount({list:vi.fn(async()=>({activities:[],clock:clockSample()}))},open,route); mount.start(); mount.scan();
+    const open=vi.fn(); const mount=new Mount({list:vi.fn(async()=>({activities:[],clock:clockSample()}))},open); mount.start(); mount.scan();
     document.querySelector<HTMLButtonElement>('.seu-lecture-helper-button')!.click(); expect(open).toHaveBeenCalledWith('detail-id');
     const foot=document.querySelector('.hdxq-foot')!; foot.innerHTML='<button>预约</button>'; mount.scan(); expect(foot.querySelectorAll('.seu-lecture-helper-button')).toHaveLength(1);
-    history.replaceState(null,'','/#/other'); window.dispatchEvent(new HashChangeEvent('hashchange')); expect(route).toHaveBeenCalled(); expect(document.querySelector('.seu-lecture-helper-button')).toBeNull(); mount.stop();
+    history.replaceState(null,'','/#/other'); window.dispatchEvent(new HashChangeEvent('hashchange')); expect(document.querySelector('.seu-lecture-helper-button')).toBeNull(); mount.stop();
   });
 });
 describe('cross-tab task lock', () => {

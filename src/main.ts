@@ -48,7 +48,7 @@ if (!document.documentElement.hasAttribute('data-seu-lecture-helper')) {
     } catch (error) {release?.(); notice(message(error));}
     finally {opening = false;}
   }
-  const mount = new Mount(api, id => {void open(id);}, () => close());
+  const mount = new Mount(api, id => {void open(id);});
   mount.start();
   const pending=readTask();if(pending)void open(pending.id,pending);
   window.addEventListener('pagehide', () => {mount.stop(); close(false);void logStore.flush();});

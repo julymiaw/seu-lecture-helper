@@ -34,9 +34,9 @@ export class Mount {
   private timer?: ReturnType<typeof setTimeout>;
   private epoch = 0;
   private stopped = false;
-  constructor(private api: Pick<ReservationApi, 'list'>, private open: (id: string) => void, private routeChange = () => {}) {}
+  constructor(private api: Pick<ReservationApi, 'list'>, private open: (id: string) => void) {}
   private route = () => {
-    this.routeChange(); this.remove(); this.items = []; void this.load();
+    this.remove(); this.items = []; void this.load();
   };
   private remove() {document.querySelectorAll('.' + BUTTON).forEach(x => x.remove());}
   start() {

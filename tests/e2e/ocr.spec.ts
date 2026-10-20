@@ -292,3 +292,29 @@ for(const offset of [-10000,10000])test(`server offset ${offset} cannot affect l
   await page.clock.runFor(1);await expect(progress(page)).toContainText('预约成功');
   expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);expect(state.detailCalls()).toBe(1);expect(state.failures).toEqual([]);
 });
+
+
+test('waiting task survives detail navigation and browser back/forward',async({page})=>{
+  const state=await setup(page,{pair:true,future:true});await openHelper(page);await page.locator('#start').click();
+  await page.getByRole('button',{name:'收起',exact:true}).click();
+  const pending=await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'));
+  expect(pending).toBeTruthy();
+  await expect(page.getByRole('button',{name:'等待中',exact:true})).toHaveCount(2);
+  await page.evaluate(id=>{
+    const detail=document.createElement('div');detail.className='hdxq-foot';detail.innerHTML='<button>预约</button>';document.body.append(detail);
+    location.hash='/hdxq?WID='+id;
+  },raw.datas.hdlbList[0].WID);
+  await expect(page.locator('.hdxq-foot .seu-lecture-helper-button')).toHaveText('等待中');
+  await page.goBack();await expect(page.getByRole('button',{name:'等待中',exact:true})).toHaveCount(2);
+  await page.goForward();await expect(page.locator('.hdxq-foot .seu-lecture-helper-button')).toHaveText('等待中');
+  await page.locator('.hdxq-foot .seu-lecture-helper-button').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','waiting');
+  await expect(page.locator('#start')).toBeHidden();
+  expect(await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'))).toBe(pending);
+  expect(state.writes()).toBe(0);expect(state.captchaCalls()).toBe(0);
+  await page.getByRole('button',{name:'收起',exact:true}).click();await page.goBack();
+  await page.getByRole('button',{name:'等待中',exact:true}).last().click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','waiting');
+  await page.locator('#close').click();await expect(page.getByRole('button',{name:'预约助手',exact:true})).toHaveCount(2);
+  expect(await page.evaluate(()=>sessionStorage.getItem('seu-lecture-pending-task'))).toBeNull();
+});
