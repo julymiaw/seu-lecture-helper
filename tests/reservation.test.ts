@@ -12,15 +12,15 @@ async function setup(options:{future?:number;ocr?:{prepare:()=>Promise<void>;rec
 }
 const ocr=()=>({prepare:vi.fn(async()=>{}),recognize:vi.fn(async()=> '0733')});
 it('obtains and recognizes at T-30s, then submits only at the opening deadline',async()=>{
-  const{task,api}=await setup({future:60000,ocr:ocr()});task.start();
+  const engine=ocr(),{task,api}=await setup({future:60000,ocr:engine});task.start();
   await vi.advanceTimersByTimeAsync(29999);expect(api.captcha).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(1);expect(task.state.code).toBe('0733');expect(task.state.image).toContain('data:image');expect(api.submit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);expect(task.state.code).toBe('0733');expect(engine.recognize).toHaveBeenCalledWith('data:image/jpeg;base64,VEVTVA==');expect(api.submit).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(29999);expect(api.submit).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);expect(api.submit).toHaveBeenCalledExactlyOnceWith(task.state.activity!.id,'0733');expect(task.state.phase).toBe('success');
 });
 
 it('always uses 30 seconds, including recovery from an old 10-second setting',async()=>{
-  const{task,api,activity}=await setup({future:60000,ocr:ocr()});await task.open(activity.id,{leadSeconds:10,verify:false});expect(api.captcha).not.toHaveBeenCalled();task.start();
+  const{task,api,activity}=await setup({future:60000,ocr:ocr()});const legacy={leadSeconds:10,verify:false};await task.open(activity.id,legacy);expect(api.captcha).not.toHaveBeenCalled();task.start();
   await vi.advanceTimersByTimeAsync(29999);expect(api.captcha).not.toHaveBeenCalled();await vi.advanceTimersByTimeAsync(1);expect(api.captcha).toHaveBeenCalledTimes(1);task.close();
 });
 it('uses the server offset for both early acquisition and final submission',async()=>{
@@ -89,7 +89,7 @@ it('pending OCR at opening submits once as soon as it finishes',async()=>{
   const pending=deferred<string>();const{task,api}=await setup({future:10000,ocr:{prepare:async()=>{},recognize:()=>pending.promise}});task.start();await flush();await vi.advanceTimersByTimeAsync(10000);expect(api.submit).not.toHaveBeenCalled();pending.resolve('1234');await flush();expect(api.submit).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('success');
 });
 it('late CAPTCHA response after closing is ignored',async()=>{
-  const pending=deferred<string>();const{task}=await setup({overrides:{captcha:vi.fn(async()=> (await pending.promise)!)}});task.start();task.close();pending.resolve('old-image');await flush();expect(task.state.phase).toBe('closed');expect(task.state.image).toBeUndefined();
+  const pending=deferred<string>(),engine=ocr();const{task,api}=await setup({ocr:engine,overrides:{captcha:vi.fn(async()=>pending.promise)}});task.start();task.close();pending.resolve('old-image');await flush();expect(task.state.phase).toBe('closed');expect(engine.recognize).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
 });
 it('falls back to detail data when the target is absent from the list',async()=>{
   const{task,api}=await setup({overrides:{list:vi.fn(async()=>({activities:[],offset:0}))}});expect(api.detail).toHaveBeenCalledTimes(1);task.start();await flush();expect(api.captcha).toHaveBeenCalledTimes(1);task.close();
@@ -127,8 +127,8 @@ it('unavailable activities do not prepare OCR resources',async()=>{
   }
 });
 it('checks the session once per minute but stops before final captcha preparation',async()=>{
-  const{task,api}=await setup({future:180000,ocr:ocr()});task.start();
-  await vi.advanceTimersByTimeAsync(60000);expect(api.captcha).toHaveBeenCalledTimes(1);expect(task.state.image).toBeUndefined();
+  const engine=ocr(),{task,api}=await setup({future:180000,ocr:engine});task.start();
+  await vi.advanceTimersByTimeAsync(60000);expect(api.captcha).toHaveBeenCalledTimes(1);expect(engine.recognize).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(60000);expect(api.captcha).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(30000);expect(api.captcha).toHaveBeenCalledTimes(3);expect(task.state.code).toBe('0733');
   await vi.advanceTimersByTimeAsync(30000);expect(api.captcha).toHaveBeenCalledTimes(3);expect(api.submit).toHaveBeenCalledTimes(1);

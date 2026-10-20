@@ -241,7 +241,7 @@ test('temporary metadata failure on recovery retains the pending group for reloa
 test('exports persistent JSON after reload without needing Console and centers the countdown',async({page})=>{
   await page.clock.install();const state=await setup(page,{future:true});await openHelper(page);await expect(page.locator('#lead')).toHaveCount(0);
   const centered=await page.locator('.clock').evaluate(el=>{const a=el.getBoundingClientRect(),b=el.parentElement!.getBoundingClientRect();return Math.abs(a.x+a.width/2-b.x-b.width/2)<1;});expect(centered).toBe(true);
-  await page.locator('#start').click();const saved=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('seu-lecture-pending-task')!));expect(saved.leadSeconds).toBe(30);expect(saved.runId).toBeTruthy();
+  await page.locator('#start').click();const saved=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('seu-lecture-pending-task')!));expect(saved).not.toHaveProperty('leadSeconds');expect(saved.runId).toBeTruthy();
   // Export flushes buffered records; the subsequent reload must read persisted history.
   const firstDownload=page.waitForEvent('download');await page.locator('#export').click();await firstDownload;
   await page.reload();await page.addScriptTag({content:script});await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});await page.clock.fastForward(3601000);await expect(progress(page)).toContainText('预约成功',{timeout:20000});

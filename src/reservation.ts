@@ -4,11 +4,11 @@ import {findCandidates,ordered,classified,mode,type Mode} from './candidates';
 import {Diagnostics, businessReason, errorInfo} from './diagnostics';
 export type Phase = 'choosing' | 'login-required' | 'loading' | 'ready' | 'waiting' | 'captcha-loading' | 'recognizing' | 'prepared' | 'submitting' | 'verifying' | 'success' | 'failed' | 'unknown' | 'closed';
 export const CAPTURE_LEAD_MS=30000;
-export interface Recovery {leadSeconds?:number;runId?:string;verify:boolean;ids?:string[];index?:number;preferred?:Mode}
+export interface Recovery {runId?:string;verify:boolean;ids?:string[];index?:number;preferred?:Mode}
 export interface State {
   fullIds?:string[]; requestedId?:string; candidates?:Activity[]; candidateIndex?:number; preferred?:Mode;
   phase: Phase; message: string; runId?:string; verifiedId?:string; activity?: Activity; offset?: number; remaining?: number;
-  image?: string; code?: string; armed?: boolean;
+  code?: string; armed?: boolean;
   ocrStatus?: 'loading' | 'ready' | 'failed'; verifyAfterLogin?:boolean;
 }
 export function fullCapacity(state: State) {const a=state.activity; return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);}
@@ -78,7 +78,16 @@ export class Reservation {
   async open(id:string,recovery?:Recovery) {
     this.targetId=id;this.recovery=recovery;
     const g=++this.generation;
-    this.diagnostics=new Diagnostics(recovery?.runId);this.captchaSentAt=undefined;this.captchaReceivedAt=undefined;this.ocrFinishedAt=undefined;this.lastSessionCheckAt=undefined;this.round=0;this.submissions=0;this.preparing=undefined;this.sessionChecking=false;this.expectedTickAt=undefined;
+    this.diagnostics=new Diagnostics(recovery?.runId);
+    this.captchaSentAt=undefined;
+    this.captchaReceivedAt=undefined;
+    this.ocrFinishedAt=undefined;
+    this.lastSessionCheckAt=undefined;
+    this.round=0;
+    this.submissions=0;
+    this.preparing=undefined;
+    this.sessionChecking=false;
+    this.expectedTickAt=undefined;
     this.state={phase:'loading',message:'正在获取活动信息',runId:this.diagnostics.run,verifyAfterLogin:recovery?.verify,preferred:recovery?.preferred??'online'};this.publish(this.state);
     this.diagnostics.record('log','打开任务',{activityId:id,recovered:Boolean(recovery),verifyOnly:Boolean(recovery?.verify)});
     if(recovery?.verify){this.set('unknown','恢复后先核验之前的提交结果');return;}
@@ -89,7 +98,15 @@ export class Reservation {
       if(!activity){const detail=await this.stage('活动详情查询',()=>this.api.detail(id));activity=detail.activity;offset=detail.offset;}
       if(!this.valid(g))return;
       let candidates:Activity[];
-      if(recovery?.ids){candidates=[];for(const candidateId of recovery.ids){let item=data.activities.find(a=>a.id===candidateId);if(!item)item=(await this.stage('候选详情查询',()=>this.api.detail(candidateId))).activity;if(!this.valid(g))return;candidates.push(item);}}
+      if(recovery?.ids){
+        candidates=[];
+        for(const candidateId of recovery.ids){
+          let item=data.activities.find(a=>a.id===candidateId);
+          if(!item)item=(await this.stage('候选详情查询',()=>this.api.detail(candidateId))).activity;
+          if(!this.valid(g))return;
+          candidates.push(item);
+        }
+      }
       else candidates=recovery?[activity]:ordered(findCandidates(activity,data.activities),this.state.preferred!);
       let index=recovery?.index??0;activity=candidates[index];
       if(!activity)throw new ApiError('恢复的候选场次无效','format');
@@ -128,7 +145,7 @@ export class Reservation {
     const index=(this.state.candidateIndex??0)+1,next=this.state.candidates?.[index];if(!next)return false;
     ++this.generation;++this.ocrEpoch;clearTimeout(this.timer);clearTimeout(this.retryTimer);this.round=0;this.preparing=undefined;this.sessionChecking=false;this.expectedTickAt=undefined;
     this.targetId=next.id;this.diagnostics.record('warn','满员切换候选',{activityId:this.state.activity?.id,nextActivityId:next.id,priority:index+1});
-    this.set('waiting','',{activity:next,candidateIndex:index,image:undefined,code:'',armed:true});this.tick();return true;
+    this.set('waiting','',{activity:next,candidateIndex:index,code:'',armed:true});this.tick();return true;
   }
   start() {
     if(!controls(this.state,this.now()).start || !this.bookable())return;
@@ -139,7 +156,7 @@ export class Reservation {
   }
   private requireLogin() {
     ++this.generation;++this.ocrEpoch;clearTimeout(this.timer);clearTimeout(this.retryTimer);this.wake?.();this.wake=undefined;
-    this.set('login-required','登录已失效；登录后恢复任务',{image:undefined,code:'',remaining:undefined,verifyAfterLogin:['submitting','verifying','unknown'].includes(this.state.phase) || this.state.verifyAfterLogin});
+    this.set('login-required','登录已失效；登录后恢复任务',{code:'',remaining:undefined,verifyAfterLogin:['submitting','verifying','unknown'].includes(this.state.phase) || this.state.verifyAfterLogin});
   }
   async resume() {
     if(this.state.phase!=='login-required' || !this.targetId)return;
@@ -183,7 +200,7 @@ export class Reservation {
     const g=this.generation,epoch=++this.ocrEpoch;
     ++this.round;
     this.diagnostics.record('log','开始取图轮次',{round:this.round,plannedCaptureAt:new Date(this.state.activity!.startsAt-(this.state.offset??0)-CAPTURE_LEAD_MS).toISOString(),captureDelayMs:this.serverNow()-this.state.activity!.startsAt+CAPTURE_LEAD_MS,serverOffsetMs:this.state.offset,afterOpenMs:this.serverNow()-this.state.activity!.startsAt,ocrReady:this.state.ocrStatus==='ready',visibility:document.visibilityState});
-    this.set('captcha-loading','正在获取验证码',{image:undefined,code:''});
+    this.set('captcha-loading','正在获取验证码',{code:''});
     for(let attempt=0;attempt<3;attempt++) {
       try {
         this.captchaSentAt=this.now();this.captchaReceivedAt=undefined;this.ocrFinishedAt=undefined;
@@ -191,7 +208,7 @@ export class Reservation {
         if(!this.valid(g)||epoch!==this.ocrEpoch||!this.bookable())return;
         this.captchaReceivedAt=this.now();
         this.diagnostics.record('log','验证码到达',{round:this.round,requestAttempt:attempt+1,captchaSentAt:this.captchaSentAt,captchaReceivedAt:this.captchaReceivedAt});
-        this.set('recognizing','正在识别验证码',{image});
+        this.set('recognizing','正在识别验证码');
         void this.recognize(image,epoch);
         return;
       }catch(error){
@@ -222,7 +239,7 @@ export class Reservation {
   }
   private async retryCaptcha() {
     this.diagnostics.record('warn','验证码重试');
-    this.set('waiting','正在更新验证码',{image:undefined,code:''});
+    this.set('waiting','正在更新验证码',{code:''});
     await this.loadCaptcha();
   }
   private async submit() {
@@ -230,27 +247,63 @@ export class Reservation {
     const code=this.state.code!.trim();
     ++this.ocrEpoch;clearTimeout(this.timer);
     const g=this.generation;++this.submissions;
-    this.diagnostics.record('log','提交时机',{activityId:this.state.activity!.id,priority:(this.state.candidateIndex??0)+1,attempt:this.submissions,afterOpenMs:this.serverNow()-this.state.activity!.startsAt,captchaSentAt:this.captchaSentAt,captchaReceivedAt:this.captchaReceivedAt,captchaHeldMs:this.captchaReceivedAt===undefined?undefined:this.now()-this.captchaReceivedAt,captchaRequestAgeMs:this.captchaSentAt===undefined?undefined:this.now()-this.captchaSentAt,ocrWaitMs:this.ocrFinishedAt===undefined?undefined:this.now()-this.ocrFinishedAt,lastSessionCheckAt:this.lastSessionCheckAt,sessionCheckAgeMs:this.lastSessionCheckAt===undefined?undefined:this.now()-this.lastSessionCheckAt,visibility:document.visibilityState});
+    this.diagnostics.record('log','提交时机',{
+      activityId:this.state.activity!.id,
+      priority:(this.state.candidateIndex??0)+1,
+      attempt:this.submissions,
+      afterOpenMs:this.serverNow()-this.state.activity!.startsAt,
+      captchaSentAt:this.captchaSentAt,
+      captchaReceivedAt:this.captchaReceivedAt,
+      captchaHeldMs:this.captchaReceivedAt===undefined?undefined:this.now()-this.captchaReceivedAt,
+      captchaRequestAgeMs:this.captchaSentAt===undefined?undefined:this.now()-this.captchaSentAt,
+      ocrWaitMs:this.ocrFinishedAt===undefined?undefined:this.now()-this.ocrFinishedAt,
+      lastSessionCheckAt:this.lastSessionCheckAt,
+      sessionCheckAgeMs:this.lastSessionCheckAt===undefined?undefined:this.now()-this.lastSessionCheckAt,
+      visibility:document.visibilityState,
+    });
     this.set('submitting','正在提交预约');
     try{await this.stage('预约提交',()=>this.api.submit(this.state.activity!.id,code));this.diagnostics.record('log','服务端报告预约成功',{responseCode:0,responseData:1});}
     catch(error){
       if(!this.valid(g))return;
       const reason=error instanceof ApiError && error.kind==='business'?businessReason(error.message):undefined;
-      let action='核验当前预约';
-      if(reason==='full')action=(this.state.candidateIndex??0)+1<(this.state.candidates?.length??1)?'切换下一候选':'停止：所有候选已满';
-      else if(reason==='captcha-rejected'||reason==='not-open')action='当前场次换图重试';
-      else if(error instanceof ApiError && error.kind==='session')action='等待登录恢复';
-      else if(error instanceof ApiError && (error.kind==='rate'||error.kind==='business' && reason!=='already-booked'))action='停止';
-      if(reason==='full')this.set(this.state.phase,this.state.message,{fullIds:[...new Set([...(this.state.fullIds??[]),this.state.activity!.id])]});
-      this.diagnostics.record('warn','提交处理决定',{activityId:this.state.activity!.id,candidateMode:mode(this.state.activity!),priority:(this.state.candidateIndex??0)+1,attempt:this.submissions,...errorInfo(error),action});
-      if(error instanceof ApiError && error.kind==='session'){this.requireLogin();return;}
-      if(error instanceof ApiError && error.kind==='rate'){this.stop(message(error));return;}
+      const recordDecision=(action:string)=>this.diagnostics.record('warn','提交处理决定',{
+        activityId:this.state.activity!.id,
+        candidateMode:mode(this.state.activity!),
+        priority:(this.state.candidateIndex??0)+1,
+        attempt:this.submissions,
+        ...errorInfo(error),
+        action,
+      });
+      if(error instanceof ApiError && error.kind==='session'){
+        recordDecision('等待登录恢复');
+        this.requireLogin();return;
+      }
+      if(error instanceof ApiError && error.kind==='rate'){
+        recordDecision('停止');
+        this.stop(message(error));return;
+      }
       if(error instanceof ApiError && error.kind==='business'){
-        if(reason==='full'){if(this.advanceCandidate())return;this.stop((this.state.candidates?.length??0)>1?'两个场次均已满，预约失败':'人数已满，预约失败');return;}
-        if(reason==='already-booked'){await this.verify();return;}
-        if(reason==='captcha-rejected' || reason==='not-open'){await this.retryCaptcha();return;}
+        if(reason==='full'){
+          this.set(this.state.phase,this.state.message,{fullIds:[...new Set([...(this.state.fullIds??[]),this.state.activity!.id])]});
+          if(this.state.candidates?.[(this.state.candidateIndex??0)+1]){
+            recordDecision('切换下一候选');
+            this.advanceCandidate();return;
+          }
+          recordDecision('停止：所有候选已满');
+          this.stop((this.state.candidates?.length??0)>1?'两个场次均已满，预约失败':'人数已满，预约失败');return;
+        }
+        if(reason==='already-booked'){
+          recordDecision('核验当前预约');
+          await this.verify();return;
+        }
+        if(reason==='captcha-rejected' || reason==='not-open'){
+          recordDecision('当前场次换图重试');
+          await this.retryCaptcha();return;
+        }
+        recordDecision('停止');
         this.stop(error.message);return;
       }
+      recordDecision('核验当前预约');
       this.diagnostics.record('warn','提交结果不明，转入核验',errorInfo(error));
     }
     if(this.valid(g))await this.verify();
@@ -258,9 +311,8 @@ export class Reservation {
   private wait(ms:number){return new Promise<void>(resolve=>{this.wake=resolve;this.retryTimer=setTimeout(()=>{this.wake=undefined;resolve();},ms);});}
   async verify() {
     const id=this.state.activity?.id??this.targetId;
-    if (!id || !['submitting', 'unknown', 'verifying'].includes(this.state.phase)) return;
-    // Public recheck cannot start a second concurrent verification loop.
-    if (this.state.phase === 'verifying') return;
+    // Only a submitted or unresolved task may start a verification loop.
+    if (!id || !['submitting', 'unknown'].includes(this.state.phase)) return;
     const g = this.generation;
     this.set('verifying', '正在查询预约记录');
     let detail = '';

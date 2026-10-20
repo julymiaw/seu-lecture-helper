@@ -16,3 +16,14 @@ export async function mockApi(overrides: Partial<ReservationApi> = {}) {
     captcha: vi.fn(async () => 'data:image/jpeg;base64,VEVTVA=='), submit: vi.fn(async () => {}), booked: vi.fn(async () => true), ...overrides};
 }
 export function deferred<T>() {let resolve!: (x: T) => void; let reject!: (x: unknown) => void; const promise = new Promise<T>((a,b) => {resolve=a; reject=b;}); return {promise,resolve,reject};}
+export function trackedStorage() {
+  const values=new Map<string,string>();
+  return {
+    get length(){return values.size;},
+    key:(index:number)=>[...values.keys()][index]??null,
+    clear:()=>values.clear(),
+    getItem:(key:string)=>values.get(key)??null,
+    setItem:vi.fn((key:string,value:string)=>{values.set(key,value);}),
+    removeItem:(key:string)=>{values.delete(key);},
+  };
+}

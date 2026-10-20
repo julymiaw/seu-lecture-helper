@@ -2,13 +2,13 @@ import {expect,it,vi} from 'vitest';
 import {Reservation} from '../src/reservation';
 import {ApiError} from '../src/api';
 import {readTask,saveTask} from '../src/task-store';
-import {NOW,sample,mockApi} from './helpers';
+import {NOW,sample,mockApi,trackedStorage} from './helpers';
 const engine=()=>({prepare:vi.fn(async()=>{}),recognize:vi.fn(async()=> '0733')});
 const flush=async()=>{for(let i=0;i<70;i++)await Promise.resolve();};
 it.each([0,1])('repeated authentication failures preserve candidate group and priority at index %s',async index=>{
   vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();
   const online={...await sample(),id:'on',title:'【线上】同一讲座',reserved:false,startsAt:NOW+180000},offline={...online,id:'off',title:'【线下】同一讲座',place:'报告厅'};
-  const intent={leadSeconds:30,verify:false,ids:['off','on'],index,preferred:'offline' as const};
+  const intent={verify:false,ids:['off','on'],index,preferred:'offline' as const};
   const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],offset:0})),captcha:vi.fn(async()=>{throw new ApiError('未登录','session',401);})});
   const task=new Reservation(api,s=>saveTask(s),Date.now,engine());await task.open(intent.ids[index],intent);task.start();await vi.advanceTimersByTimeAsync(60000);
   expect(task.state.phase).toBe('login-required');const before=readTask();expect(before).toMatchObject(intent);
@@ -43,4 +43,21 @@ it('same-page verification login recovery preserves the candidate display and pu
   const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],offset:0})),submit:vi.fn().mockRejectedValueOnce(new ApiError('人数已满','business')).mockRejectedValueOnce(new ApiError('未登录','session',401))});
   const task=new Reservation(api,s=>saveTask(s),Date.now,engine());await task.open(online.id);task.start();await flush();expect(task.state.phase).toBe('login-required');const candidates=task.state.candidates;
   await task.resume();expect(task.state.phase).toBe('success');expect(task.state.activity?.title).toBe(offline.title);expect(task.state.activity?.reserved).toBe(true);expect(task.state.verifiedId).toBe('off');expect(task.state.candidates).toEqual(candidates);expect(task.state.fullIds).toEqual(['on']);expect(task.state.candidateIndex).toBe(1);expect(api.list).toHaveBeenCalledTimes(1);expect(api.submit).toHaveBeenCalledTimes(2);expect(readTask()).toBeUndefined();
+});
+it('countdown ticks do not rewrite intent, but changing candidates and entering submit are saved immediately',async()=>{
+  vi.useFakeTimers();vi.setSystemTime(NOW);sessionStorage.clear();
+  const online={...await sample(),id:'on',title:'【线上】同一讲座',reserved:false,startsAt:NOW+60000};
+  const offline={...online,id:'off',title:'【线下】同一讲座'};
+  const writes:ReturnType<typeof readTask>[]=[],storage=trackedStorage(),set=storage.setItem;
+  const api=await mockApi({list:vi.fn(async()=>({activities:[online,offline],offset:0})),submit:vi.fn(async()=>{
+    writes.push(readTask(storage));
+    if(readTask(storage)?.id==='on')throw new ApiError('人数已满','business');
+  })});
+  const task=new Reservation(api,s=>saveTask(s,storage),Date.now,engine());await task.open('on');task.start();
+  await vi.advanceTimersByTimeAsync(10000);expect(set).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(50000);await flush();
+  expect(writes.map(row=>({id:row?.id,index:row?.index,verify:row?.verify}))).toEqual([
+    {id:'on',index:0,verify:true},{id:'off',index:1,verify:true},
+  ]);
+  expect(task.state.phase).toBe('success');expect(readTask(storage)).toBeUndefined();
 });

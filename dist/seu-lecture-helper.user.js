@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.2
+// @version      0.7.3
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -178,7 +178,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.2";
+  var version = "0.7.3";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -619,7 +619,7 @@ SOFTWARE.
       this.expectedTickAt = void 0;
       this.targetId = next.id;
       this.diagnostics.record("warn", "\u6EE1\u5458\u5207\u6362\u5019\u9009", { activityId: this.state.activity?.id, nextActivityId: next.id, priority: index + 1 });
-      this.set("waiting", "", { activity: next, candidateIndex: index, image: void 0, code: "", armed: true });
+      this.set("waiting", "", { activity: next, candidateIndex: index, code: "", armed: true });
       this.tick();
       return true;
     }
@@ -637,7 +637,7 @@ SOFTWARE.
       clearTimeout(this.retryTimer);
       this.wake?.();
       this.wake = void 0;
-      this.set("login-required", "\u767B\u5F55\u5DF2\u5931\u6548\uFF1B\u767B\u5F55\u540E\u6062\u590D\u4EFB\u52A1", { image: void 0, code: "", remaining: void 0, verifyAfterLogin: ["submitting", "verifying", "unknown"].includes(this.state.phase) || this.state.verifyAfterLogin });
+      this.set("login-required", "\u767B\u5F55\u5DF2\u5931\u6548\uFF1B\u767B\u5F55\u540E\u6062\u590D\u4EFB\u52A1", { code: "", remaining: void 0, verifyAfterLogin: ["submitting", "verifying", "unknown"].includes(this.state.phase) || this.state.verifyAfterLogin });
     }
     async resume() {
       if (this.state.phase !== "login-required" || !this.targetId) return;
@@ -698,7 +698,7 @@ SOFTWARE.
       const g = this.generation, epoch = ++this.ocrEpoch;
       ++this.round;
       this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedCaptureAt: new Date(this.state.activity.startsAt - (this.state.offset ?? 0) - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + CAPTURE_LEAD_MS, serverOffsetMs: this.state.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
-      this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
+      this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           this.captchaSentAt = this.now();
@@ -708,7 +708,7 @@ SOFTWARE.
           if (!this.valid(g) || epoch !== this.ocrEpoch || !this.bookable()) return;
           this.captchaReceivedAt = this.now();
           this.diagnostics.record("log", "\u9A8C\u8BC1\u7801\u5230\u8FBE", { round: this.round, requestAttempt: attempt + 1, captchaSentAt: this.captchaSentAt, captchaReceivedAt: this.captchaReceivedAt });
-          this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801", { image });
+          this.set("recognizing", "\u6B63\u5728\u8BC6\u522B\u9A8C\u8BC1\u7801");
           void this.recognize(image, epoch);
           return;
         } catch (error) {
@@ -756,7 +756,7 @@ SOFTWARE.
     }
     async retryCaptcha() {
       this.diagnostics.record("warn", "\u9A8C\u8BC1\u7801\u91CD\u8BD5");
-      this.set("waiting", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801", { image: void 0, code: "" });
+      this.set("waiting", "\u6B63\u5728\u66F4\u65B0\u9A8C\u8BC1\u7801", { code: "" });
       await this.loadCaptcha();
     }
     async submit() {
@@ -766,7 +766,20 @@ SOFTWARE.
       clearTimeout(this.timer);
       const g = this.generation;
       ++this.submissions;
-      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", { activityId: this.state.activity.id, priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, afterOpenMs: this.serverNow() - this.state.activity.startsAt, captchaSentAt: this.captchaSentAt, captchaReceivedAt: this.captchaReceivedAt, captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.now() - this.captchaReceivedAt, captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.now() - this.captchaSentAt, ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.now() - this.ocrFinishedAt, lastSessionCheckAt: this.lastSessionCheckAt, sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.now() - this.lastSessionCheckAt, visibility: document.visibilityState });
+      this.diagnostics.record("log", "\u63D0\u4EA4\u65F6\u673A", {
+        activityId: this.state.activity.id,
+        priority: (this.state.candidateIndex ?? 0) + 1,
+        attempt: this.submissions,
+        afterOpenMs: this.serverNow() - this.state.activity.startsAt,
+        captchaSentAt: this.captchaSentAt,
+        captchaReceivedAt: this.captchaReceivedAt,
+        captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.now() - this.captchaReceivedAt,
+        captchaRequestAgeMs: this.captchaSentAt === void 0 ? void 0 : this.now() - this.captchaSentAt,
+        ocrWaitMs: this.ocrFinishedAt === void 0 ? void 0 : this.now() - this.ocrFinishedAt,
+        lastSessionCheckAt: this.lastSessionCheckAt,
+        sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.now() - this.lastSessionCheckAt,
+        visibility: document.visibilityState
+      });
       this.set("submitting", "\u6B63\u5728\u63D0\u4EA4\u9884\u7EA6");
       try {
         await this.stage("\u9884\u7EA6\u63D0\u4EA4", () => this.api.submit(this.state.activity.id, code));
@@ -774,38 +787,51 @@ SOFTWARE.
       } catch (error) {
         if (!this.valid(g)) return;
         const reason = error instanceof ApiError && error.kind === "business" ? businessReason(error.message) : void 0;
-        let action = "\u6838\u9A8C\u5F53\u524D\u9884\u7EA6";
-        if (reason === "full") action = (this.state.candidateIndex ?? 0) + 1 < (this.state.candidates?.length ?? 1) ? "\u5207\u6362\u4E0B\u4E00\u5019\u9009" : "\u505C\u6B62\uFF1A\u6240\u6709\u5019\u9009\u5DF2\u6EE1";
-        else if (reason === "captcha-rejected" || reason === "not-open") action = "\u5F53\u524D\u573A\u6B21\u6362\u56FE\u91CD\u8BD5";
-        else if (error instanceof ApiError && error.kind === "session") action = "\u7B49\u5F85\u767B\u5F55\u6062\u590D";
-        else if (error instanceof ApiError && (error.kind === "rate" || error.kind === "business" && reason !== "already-booked")) action = "\u505C\u6B62";
-        if (reason === "full") this.set(this.state.phase, this.state.message, { fullIds: [.../* @__PURE__ */ new Set([...this.state.fullIds ?? [], this.state.activity.id])] });
-        this.diagnostics.record("warn", "\u63D0\u4EA4\u5904\u7406\u51B3\u5B9A", { activityId: this.state.activity.id, candidateMode: mode(this.state.activity), priority: (this.state.candidateIndex ?? 0) + 1, attempt: this.submissions, ...errorInfo(error), action });
+        const recordDecision = (action) => this.diagnostics.record("warn", "\u63D0\u4EA4\u5904\u7406\u51B3\u5B9A", {
+          activityId: this.state.activity.id,
+          candidateMode: mode(this.state.activity),
+          priority: (this.state.candidateIndex ?? 0) + 1,
+          attempt: this.submissions,
+          ...errorInfo(error),
+          action
+        });
         if (error instanceof ApiError && error.kind === "session") {
+          recordDecision("\u7B49\u5F85\u767B\u5F55\u6062\u590D");
           this.requireLogin();
           return;
         }
         if (error instanceof ApiError && error.kind === "rate") {
+          recordDecision("\u505C\u6B62");
           this.stop(message(error));
           return;
         }
         if (error instanceof ApiError && error.kind === "business") {
           if (reason === "full") {
-            if (this.advanceCandidate()) return;
+            this.set(this.state.phase, this.state.message, { fullIds: [.../* @__PURE__ */ new Set([...this.state.fullIds ?? [], this.state.activity.id])] });
+            if (this.state.candidates?.[(this.state.candidateIndex ?? 0) + 1]) {
+              recordDecision("\u5207\u6362\u4E0B\u4E00\u5019\u9009");
+              this.advanceCandidate();
+              return;
+            }
+            recordDecision("\u505C\u6B62\uFF1A\u6240\u6709\u5019\u9009\u5DF2\u6EE1");
             this.stop((this.state.candidates?.length ?? 0) > 1 ? "\u4E24\u4E2A\u573A\u6B21\u5747\u5DF2\u6EE1\uFF0C\u9884\u7EA6\u5931\u8D25" : "\u4EBA\u6570\u5DF2\u6EE1\uFF0C\u9884\u7EA6\u5931\u8D25");
             return;
           }
           if (reason === "already-booked") {
+            recordDecision("\u6838\u9A8C\u5F53\u524D\u9884\u7EA6");
             await this.verify();
             return;
           }
           if (reason === "captcha-rejected" || reason === "not-open") {
+            recordDecision("\u5F53\u524D\u573A\u6B21\u6362\u56FE\u91CD\u8BD5");
             await this.retryCaptcha();
             return;
           }
+          recordDecision("\u505C\u6B62");
           this.stop(error.message);
           return;
         }
+        recordDecision("\u6838\u9A8C\u5F53\u524D\u9884\u7EA6");
         this.diagnostics.record("warn", "\u63D0\u4EA4\u7ED3\u679C\u4E0D\u660E\uFF0C\u8F6C\u5165\u6838\u9A8C", errorInfo(error));
       }
       if (this.valid(g)) await this.verify();
@@ -821,8 +847,7 @@ SOFTWARE.
     }
     async verify() {
       const id = this.state.activity?.id ?? this.targetId;
-      if (!id || !["submitting", "unknown", "verifying"].includes(this.state.phase)) return;
-      if (this.state.phase === "verifying") return;
+      if (!id || !["submitting", "unknown"].includes(this.state.phase)) return;
       const g = this.generation;
       this.set("verifying", "\u6B63\u5728\u67E5\u8BE2\u9884\u7EA6\u8BB0\u5F55");
       let detail = "";
@@ -4042,9 +4067,20 @@ button:disabled{opacity:.5;cursor:default}
         return;
       }
       if (state.armed || ["submitting", "verifying", "unknown"].includes(state.phase)) {
-        const task = { id: state.activity.id, leadSeconds: CAPTURE_LEAD_MS / 1e3, runId: state.runId, endsAt: state.activity.endsAt, verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase)) };
-        if ((state.candidates?.length ?? 0) > 1) Object.assign(task, { version: 2, ids: state.candidates.map((a) => a.id), index: state.candidateIndex ?? 0, preferred: state.preferred ?? "online" });
-        storage.setItem(KEY, JSON.stringify(task));
+        const task = {
+          id: state.activity.id,
+          runId: state.runId,
+          endsAt: state.activity.endsAt,
+          verify: Boolean(state.verifyAfterLogin || ["submitting", "verifying", "unknown"].includes(state.phase))
+        };
+        if ((state.candidates?.length ?? 0) > 1) Object.assign(task, {
+          version: 2,
+          ids: state.candidates.map((a) => a.id),
+          index: state.candidateIndex ?? 0,
+          preferred: state.preferred ?? "online"
+        });
+        const serialized = JSON.stringify(task);
+        if (storage.getItem(KEY) !== serialized) storage.setItem(KEY, serialized);
       }
     } catch {
     }
@@ -4052,7 +4088,7 @@ button:disabled{opacity:.5;cursor:default}
   function readTask(storage = sessionStorage) {
     try {
       const task = JSON.parse(storage.getItem(KEY) ?? "null");
-      if (task && typeof task.id === "string" && (task.leadSeconds === void 0 || [10, 20, 30, 60].includes(task.leadSeconds)) && (task.runId === void 0 || typeof task.runId === "string" && task.runId.length > 0 && task.runId.length <= 150) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && (task.verify || task.endsAt > Date.now())) {
+      if (task && typeof task.id === "string" && (task.runId === void 0 || typeof task.runId === "string" && task.runId.length > 0 && task.runId.length <= 150) && typeof task.verify === "boolean" && Number.isFinite(task.endsAt) && (task.verify || task.endsAt > Date.now())) {
         if (task.version === void 0 && task.ids === void 0) return task;
         if (task.version === 2 && Array.isArray(task.ids) && task.ids.length === 2 && task.ids.every((id) => typeof id === "string" && id.length > 0) && new Set(task.ids).size === 2 && Number.isInteger(task.index) && task.index >= 0 && task.index < 2 && task.ids[task.index] === task.id && ["online", "offline"].includes(task.preferred)) return task;
       }
