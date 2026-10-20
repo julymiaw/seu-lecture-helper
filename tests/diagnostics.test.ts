@@ -87,9 +87,9 @@ it('opening a full activity reports a business warning without a console error',
 it('records captcha holding time, OCR wait and last successful session check at submission',async()=>{
   vi.useFakeTimers();const {Reservation}=await import('../src/reservation');const {mockApi,NOW,sample}=await import('./helpers');vi.setSystemTime(NOW);
   const activity={...await sample(),reserved:false,startsAt:NOW+180000},api=await mockApi({list:vi.fn(async()=>({activities:[activity],clock:clockSample()}))});
-  const task=new Reservation(api,vi.fn(),Date.now,engine());await task.open(activity.id);task.start();await vi.advanceTimersByTimeAsync(180000);
+  const task=new Reservation(api,vi.fn(),Date.now,engine());await task.open(activity.id);task.start();await vi.advanceTimersByTimeAsync(180050);
   const logs=vi.mocked(console.log).mock.calls.map(call=>call[1]),submit=logs.find(e=>e.event==='提交时机');
-  expect(submit).toMatchObject({captchaHeldMs:30000,captchaRequestAgeMs:30000,ocrWaitMs:30000,lastSessionCheckAt:NOW+140000,sessionCheckAgeMs:40000,afterOpenMs:0});
+  expect(submit).toMatchObject({captchaHeldMs:30050,captchaRequestAgeMs:30050,ocrWaitMs:30050,lastSessionCheckAt:NOW+140000,sessionCheckAgeMs:40050,afterOpenMs:50,timingBasis:'local',submitDelayMs:50,dispatchLateMs:0});
   expect(logs.find(e=>e.event==='验证码到达')).toMatchObject({round:1,requestAttempt:1,captchaReceivedAt:NOW+150000});expect(task.state.phase).toBe('success');
 });
 it('keeps a stable run ID across recovery while each execution has its own task ID',async()=>{

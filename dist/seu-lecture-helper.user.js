@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      0.7.5
+// @version      0.7.6
 // @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
@@ -183,7 +183,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "0.7.5";
+  var version = "0.7.6";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -392,12 +392,6 @@ SOFTWARE.
     }
   };
 
-  // src/clock.ts
-  var MAX_CLOCK_RTT_MS = 2e3;
-  function serverNow(sample, now = Date.now()) {
-    return now + (sample?.offset ?? 0);
-  }
-
   // src/candidates.ts
   function parseTitle(title) {
     const first = /^\s*[【\[]([^】\]]+)[】\]]\s*(.*)$/s.exec(title);
@@ -428,15 +422,16 @@ SOFTWARE.
 
   // src/reservation.ts
   var CAPTURE_LEAD_MS = 3e4;
+  var SUBMIT_DELAY_MS = 50;
   function fullCapacity(state) {
     const a = state.activity;
     return Boolean(a?.countKnown && a.capacity > 0 && a.count >= a.capacity);
   }
-  function controls(state, now = serverNow(state.clock)) {
+  function controls(state, now = Date.now()) {
     const a = state.activity, active = Boolean(a && !a.reserved && !a.cancelled && now < a.endsAt && (!fullCapacity(state) || (state.candidates?.length ?? 0) > 1));
     return {
       start: active && state.phase === "ready" && Boolean(classified(state.candidates ?? (a ? [a] : []))),
-      submit: active && state.phase === "prepared" && now >= a.startsAt && /^\d{4}$/.test(state.code ?? ""),
+      submit: active && state.phase === "prepared" && now >= a.startsAt + SUBMIT_DELAY_MS && /^\d{4}$/.test(state.code ?? ""),
       close: !["submitting", "verifying"].includes(state.phase)
     };
   }
@@ -461,29 +456,23 @@ SOFTWARE.
     nextSessionCheck = 0;
     sessionChecking = false;
     expectedTickAt;
-    finalClockChecked = false;
+    finalTimeObserved = false;
     diagnostics = new Diagnostics();
     captchaSentAt;
     captchaReceivedAt;
     ocrFinishedAt;
     lastSessionCheckAt;
-    serverNow() {
-      return serverNow(this.state.clock, this.now());
-    }
-    calibrate(sample, source) {
+    recordClock(sample, source) {
       const previous = this.state.clock;
-      const accepted = !previous || sample.rttMs <= MAX_CLOCK_RTT_MS;
-      const correction = previous ? sample.offset - previous.offset : void 0;
-      if (accepted) this.state = { ...this.state, clock: sample };
-      this.diagnostics.record(accepted && sample.rttMs <= MAX_CLOCK_RTT_MS ? "log" : "warn", "\u670D\u52A1\u5668\u6821\u65F6", {
+      this.state = { ...this.state, clock: sample };
+      this.diagnostics.record("log", "\u670D\u52A1\u5668\u65F6\u95F4\u89C2\u6D4B", {
         source,
         serverTime: new Date(sample.serverTime).toISOString(),
         requestRttMs: sample.rttMs,
         serverOffsetMs: sample.offset,
         previousOffsetMs: previous?.offset,
-        correctionMs: correction,
-        accepted,
-        initialSlowSample: !previous && sample.rttMs > MAX_CLOCK_RTT_MS
+        correctionMs: previous ? sample.offset - previous.offset : void 0,
+        timingApplied: false
       });
     }
     valid(g) {
@@ -506,7 +495,7 @@ SOFTWARE.
         this.finish("success", "\u8BE5\u6D3B\u52A8\u5DF2\u6709\u9884\u7EA6\u8BB0\u5F55");
         return false;
       }
-      if (a.cancelled || this.serverNow() >= a.endsAt || fullCapacity(this.state) && (this.state.candidates?.length ?? 0) < 2) {
+      if (a.cancelled || this.now() >= a.endsAt || fullCapacity(this.state) && (this.state.candidates?.length ?? 0) < 2) {
         this.stop(a.cancelled ? "\u6D3B\u52A8\u5DF2\u53D6\u6D88" : fullCapacity(this.state) ? "\u5F53\u524D\u6D3B\u52A8\u9884\u7EA6\u4EBA\u6570\u5DF2\u6EE1" : "\u9884\u7EA6\u65F6\u95F4\u5DF2\u7ED3\u675F");
         return false;
       }
@@ -552,7 +541,7 @@ SOFTWARE.
       this.preparing = void 0;
       this.sessionChecking = false;
       this.expectedTickAt = void 0;
-      this.finalClockChecked = false;
+      this.finalTimeObserved = false;
       this.state = { phase: "loading", message: "\u6B63\u5728\u83B7\u53D6\u6D3B\u52A8\u4FE1\u606F", runId: this.diagnostics.run, verifyAfterLogin: recovery?.verify, preferred: recovery?.preferred ?? "online" };
       this.publish(this.state);
       this.diagnostics.record("log", "\u6253\u5F00\u4EFB\u52A1", { activityId: id, recovered: Boolean(recovery), verifyOnly: Boolean(recovery?.verify) });
@@ -564,12 +553,12 @@ SOFTWARE.
         const data = await this.stage("\u6D3B\u52A8\u67E5\u8BE2", () => this.api.list());
         if (!this.valid(g)) return;
         let activity2 = data.activities.find((a) => a.id === id);
-        this.calibrate(data.clock, "\u6D3B\u52A8\u5217\u8868");
+        this.recordClock(data.clock, "\u6D3B\u52A8\u5217\u8868");
         if (!activity2) {
           const detail = await this.stage("\u6D3B\u52A8\u8BE6\u60C5\u67E5\u8BE2", () => this.api.detail(id));
           if (!this.valid(g)) return;
           activity2 = detail.activity;
-          this.calibrate(detail.clock, "\u6D3B\u52A8\u8BE6\u60C5");
+          this.recordClock(detail.clock, "\u6D3B\u52A8\u8BE6\u60C5");
         }
         if (!this.valid(g)) return;
         let candidates;
@@ -655,10 +644,10 @@ SOFTWARE.
       return true;
     }
     start() {
-      if (!controls(this.state, this.serverNow()).start || !this.bookable()) return;
+      if (!controls(this.state, this.now()).start || !this.bookable()) return;
       this.nextSessionCheck = this.now() + 6e4;
       this.set("waiting", "", { armed: true });
-      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { leadSeconds: CAPTURE_LEAD_MS / 1e3, serverOffsetMs: this.state.clock?.offset, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
+      this.diagnostics.record("log", "\u542F\u52A8\u4EFB\u52A1", { timingBasis: "local", submitDelayMs: SUBMIT_DELAY_MS, plannedLocalSubmitAt: new Date(this.state.activity.startsAt + SUBMIT_DELAY_MS).toISOString(), leadSeconds: CAPTURE_LEAD_MS / 1e3, serverOffsetMs: this.state.clock?.offset, activityId: this.state.activity?.id, activityTitle: this.state.activity?.title, opensAt: this.state.activity?.startsAt, endsAt: this.state.activity?.endsAt, preferred: this.state.preferred, firstCandidate: this.state.candidates?.[0]?.id, secondCandidate: this.state.candidates?.[1]?.id });
       this.tick();
     }
     requireLogin() {
@@ -693,8 +682,8 @@ SOFTWARE.
         const result = await this.stage("\u7B49\u5F85\u671F\u95F4\u767B\u5F55\u68C0\u67E5", () => this.api.detail(this.state.activity.id));
         if (!this.valid(g) || !this.state.armed) return;
         this.lastSessionCheckAt = this.now();
-        if (this.round === 0) this.calibrate(result.clock, final ? "\u5F00\u653E\u524D\u6700\u7EC8\u6821\u65F6" : "\u5468\u671F\u4FDD\u6D3B");
-        else this.diagnostics.record("warn", "\u6821\u65F6\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", requestRttMs: result.clock.rttMs });
+        if (this.round === 0) this.recordClock(result.clock, final ? "\u5F00\u653E\u524D\u6700\u7EC8\u89C2\u6D4B" : "\u5468\u671F\u4FDD\u6D3B");
+        else this.diagnostics.record("warn", "\u65F6\u95F4\u89C2\u6D4B\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", requestRttMs: result.clock.rttMs });
       } catch (error) {
         if (!this.valid(g) || !this.state.armed) return;
         if (this.round > 0) this.diagnostics.record("warn", "\u767B\u5F55\u68C0\u67E5\u7ED3\u679C\u672A\u91C7\u7EB3", { reason: "\u5DF2\u8FDB\u5165\u9A8C\u8BC1\u7801\u51C6\u5907", ...errorInfo(error) });
@@ -712,23 +701,24 @@ SOFTWARE.
       clearTimeout(this.timer);
       if (this.expectedTickAt !== void 0 && this.now() - this.expectedTickAt > 1e3) this.diagnostics.record("warn", "\u8BA1\u65F6\u56DE\u8C03\u5EF6\u8FDF", { delayMs: this.now() - this.expectedTickAt, visibility: document.visibilityState });
       if (!this.state.armed || !this.bookable()) return;
-      const remaining = this.state.activity.startsAt - this.serverNow();
+      const remaining = this.state.activity.startsAt - this.now();
       this.set(this.state.phase, this.state.message, { remaining: Math.max(0, remaining) });
       if (this.round === 0 && !this.sessionChecking && remaining > CAPTURE_LEAD_MS) {
-        const final = remaining <= 4e4 && !this.finalClockChecked;
+        const final = remaining <= 4e4 && !this.finalTimeObserved;
         if (final || remaining > 4e4 && this.now() >= this.nextSessionCheck) {
-          if (final) this.finalClockChecked = true;
+          if (final) this.finalTimeObserved = true;
           this.nextSessionCheck = this.now() + 6e4;
           this.sessionChecking = true;
           void this.checkSession(final);
         }
       }
       if (this.round === 0 && remaining <= CAPTURE_LEAD_MS) void this.loadCaptcha();
-      if (remaining <= 0) {
-        if (controls(this.state, this.serverNow()).submit) void this.submit();
+      const untilSubmit = remaining + SUBMIT_DELAY_MS;
+      if (untilSubmit <= 0) {
+        if (controls(this.state, this.now()).submit) void this.submit();
         return;
       }
-      const delay = Math.min(250, remaining);
+      const delay = Math.min(250, untilSubmit);
       this.expectedTickAt = this.now() + delay;
       this.timer = setTimeout(this.tick, delay);
     };
@@ -736,7 +726,7 @@ SOFTWARE.
       if (!this.state.armed || this.state.phase !== "waiting" || !this.bookable()) return;
       const g = this.generation, epoch = ++this.ocrEpoch;
       ++this.round;
-      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedServerCaptureAt: new Date(this.state.activity.startsAt - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.serverNow() - this.state.activity.startsAt + CAPTURE_LEAD_MS, serverOffsetMs: this.state.clock?.offset, afterOpenMs: this.serverNow() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
+      this.diagnostics.record("log", "\u5F00\u59CB\u53D6\u56FE\u8F6E\u6B21", { round: this.round, plannedLocalCaptureAt: new Date(this.state.activity.startsAt - CAPTURE_LEAD_MS).toISOString(), captureDelayMs: this.now() - this.state.activity.startsAt + CAPTURE_LEAD_MS, serverOffsetMs: this.state.clock?.offset, afterOpenMs: this.now() - this.state.activity.startsAt, ocrReady: this.state.ocrStatus === "ready", visibility: document.visibilityState });
       this.set("captcha-loading", "\u6B63\u5728\u83B7\u53D6\u9A8C\u8BC1\u7801", { code: "" });
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -788,7 +778,7 @@ SOFTWARE.
           return;
         }
         this.set("prepared", "", { code, ocrStatus: "ready" });
-        if (this.serverNow() >= this.state.activity.startsAt) await this.submit();
+        if (this.now() >= this.state.activity.startsAt + SUBMIT_DELAY_MS) await this.submit();
       } catch {
         if (this.valid(g) && epoch === this.ocrEpoch) await this.retryCaptcha();
       }
@@ -799,7 +789,7 @@ SOFTWARE.
       await this.loadCaptcha();
     }
     async submit() {
-      if (!this.bookable() || !controls(this.state, this.serverNow()).submit) return;
+      if (!this.bookable() || !controls(this.state, this.now()).submit) return;
       const code = this.state.code.trim();
       ++this.ocrEpoch;
       clearTimeout(this.timer);
@@ -809,7 +799,7 @@ SOFTWARE.
         activityId: this.state.activity.id,
         priority: (this.state.candidateIndex ?? 0) + 1,
         attempt: this.submissions,
-        afterOpenMs: this.serverNow() - this.state.activity.startsAt,
+        afterOpenMs: this.now() - this.state.activity.startsAt,
         captchaSentAt: this.captchaSentAt,
         captchaReceivedAt: this.captchaReceivedAt,
         captchaHeldMs: this.captchaReceivedAt === void 0 ? void 0 : this.now() - this.captchaReceivedAt,
@@ -818,7 +808,11 @@ SOFTWARE.
         lastSessionCheckAt: this.lastSessionCheckAt,
         clockSampleAgeMs: this.state.clock ? this.now() - this.state.clock.receivedAt : void 0,
         clockRttMs: this.state.clock?.rttMs,
-        serverOffsetMs: this.serverNow() - this.now(),
+        serverOffsetMs: this.state.clock?.offset,
+        timingBasis: "local",
+        submitDelayMs: SUBMIT_DELAY_MS,
+        dispatchLateMs: this.now() - this.state.activity.startsAt - SUBMIT_DELAY_MS,
+        estimatedServerAfterOpenMs: this.state.clock ? this.now() + this.state.clock.offset - this.state.activity.startsAt : void 0,
         sessionCheckAgeMs: this.lastSessionCheckAt === void 0 ? void 0 : this.now() - this.lastSessionCheckAt,
         visibility: document.visibilityState
       });
@@ -917,7 +911,7 @@ SOFTWARE.
       if (this.valid(g)) this.finish("unknown", "\u7ED3\u679C\u5F85\u786E\u8BA4\uFF1A" + detail + "\u3002\u8BF7\u91CD\u65B0\u6838\u9A8C\uFF0C\u4E0D\u8981\u76F4\u63A5\u91CD\u590D\u63D0\u4EA4\u3002");
     }
     close() {
-      if (!controls(this.state, this.serverNow()).close) return false;
+      if (!controls(this.state, this.now()).close) return false;
       ++this.generation;
       ++this.ocrEpoch;
       clearTimeout(this.timer);
@@ -1112,14 +1106,14 @@ button:disabled{opacity:.5;cursor:default}
       this.get("#status").hidden = !standalone || !progress(state);
       this.get("#status").textContent = standalone ? progress(state) : "";
       this.get(".overview").hidden = !["ready", "waiting", "captcha-loading", "recognizing", "prepared"].includes(state.phase);
-      this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? serverNow(state.clock)) - serverNow(state.clock)));
+      this.get(".clock").textContent = duration(state.remaining ?? Math.max(0, (state.activity?.startsAt ?? Date.now()) - Date.now()));
       this.get("#export").hidden = choosing;
       this.get("#export").disabled = this.exporting || ["submitting", "verifying"].includes(state.phase);
       this.host.dataset.ocr = state.ocrStatus;
       this.host.dataset.phase = state.phase;
       this.get("#start").hidden = state.phase !== "ready";
       this.get("#start").disabled = !allowed.start;
-      this.get("#start").textContent = (state.activity?.startsAt ?? 0) > serverNow(state.clock) ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
+      this.get("#start").textContent = (state.activity?.startsAt ?? 0) > Date.now() ? "\u5F00\u59CB\u7B49\u5F85" : "\u7ACB\u5373\u9884\u7EA6";
       this.get("#login").hidden = state.phase !== "login-required";
       this.get("#resume").hidden = state.phase !== "login-required";
       this.get("#verify").hidden = state.phase !== "unknown";

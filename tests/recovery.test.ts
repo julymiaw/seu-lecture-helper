@@ -56,7 +56,7 @@ it('countdown ticks do not rewrite intent, but changing candidates and entering 
   })});
   const task=new Reservation(api,s=>saveTask(s,storage),Date.now,engine());await task.open('on');task.start();
   await vi.advanceTimersByTimeAsync(10000);expect(set).toHaveBeenCalledTimes(1);
-  await vi.advanceTimersByTimeAsync(50000);await flush();
+  await vi.advanceTimersByTimeAsync(50050);await flush();
   expect(writes.map(row=>({id:row?.id,index:row?.index,verify:row?.verify}))).toEqual([
     {id:'on',index:0,verify:true},{id:'off',index:1,verify:true},
   ]);

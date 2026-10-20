@@ -1,4 +1,3 @@
-import {serverNow} from './clock';
 import {mode,type Mode} from './candidates';
 import {controls,type State} from './reservation';
 export interface Actions {
@@ -160,13 +159,13 @@ button:disabled{opacity:.5;cursor:default}
     this.get('#status').hidden=!standalone||!progress(state);
     this.get('#status').textContent=standalone?progress(state):'';
     this.get('.overview').hidden=!['ready','waiting','captcha-loading','recognizing','prepared'].includes(state.phase);
-    this.get('.clock').textContent=duration(state.remaining??Math.max(0,(state.activity?.startsAt??serverNow(state.clock))-serverNow(state.clock)));
+    this.get('.clock').textContent=duration(state.remaining??Math.max(0,(state.activity?.startsAt??Date.now())-Date.now()));
     this.get('#export').hidden=choosing;
     this.get<HTMLButtonElement>('#export').disabled=this.exporting||['submitting','verifying'].includes(state.phase);
     this.host.dataset.ocr=state.ocrStatus;this.host.dataset.phase=state.phase;
     this.get('#start').hidden=state.phase!=='ready';
     this.get<HTMLButtonElement>('#start').disabled=!allowed.start;
-    this.get('#start').textContent=(state.activity?.startsAt??0)>serverNow(state.clock)?'开始等待':'立即预约';
+    this.get('#start').textContent=(state.activity?.startsAt??0)>Date.now()?'开始等待':'立即预约';
     this.get('#login').hidden=state.phase!=='login-required';this.get('#resume').hidden=state.phase!=='login-required';
     this.get('#verify').hidden=state.phase!=='unknown';this.get('#reload').hidden=state.phase!=='success';
     this.get('#hide').hidden=!state.armed||['submitting','verifying'].includes(state.phase);

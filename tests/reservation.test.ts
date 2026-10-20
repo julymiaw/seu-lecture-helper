@@ -12,11 +12,13 @@ async function setup(options:{future?:number;ocr?:{prepare:()=>Promise<void>;rec
   await task.open(activity.id);await flush();return{task,api,activity};
 }
 const ocr=()=>({prepare:vi.fn(async()=>{}),recognize:vi.fn(async()=> '0733')});
-it('obtains and recognizes at T-30s, then submits only at the opening deadline',async()=>{
+it('obtains and recognizes at T-30s, then submits at local opening plus 50 ms',async()=>{
   const engine=ocr(),{task,api}=await setup({future:60000,ocr:engine});task.start();
   await vi.advanceTimersByTimeAsync(29999);expect(api.captcha).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);expect(task.state.code).toBe('0733');expect(engine.recognize).toHaveBeenCalledWith('data:image/jpeg;base64,VEVTVA==');expect(api.submit).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(29999);expect(api.submit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);expect(api.submit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(49);expect(api.submit).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);expect(api.submit).toHaveBeenCalledExactlyOnceWith(task.state.activity!.id,'0733');expect(task.state.phase).toBe('success');
 });
 
@@ -24,26 +26,29 @@ it('always uses 30 seconds, including recovery from an old 10-second setting',as
   const{task,api,activity}=await setup({future:60000,ocr:ocr()});const legacy={leadSeconds:10,verify:false};await task.open(activity.id,legacy);expect(api.captcha).not.toHaveBeenCalled();task.start();
   await vi.advanceTimersByTimeAsync(29999);expect(api.captcha).not.toHaveBeenCalled();await vi.advanceTimersByTimeAsync(1);expect(api.captcha).toHaveBeenCalledTimes(1);task.close();
 });
-it('uses the server offset for both early acquisition and final submission',async()=>{
+it.each([-10000,10000])('initial server offset %s cannot change local capture or submission timing',async offset=>{
   const activity={...await sample(),reserved:false,startsAt:NOW+40000};
-  const{task,api}=await setup({ocr:ocr(),overrides:{list:vi.fn(async()=>({activities:[activity],clock:clockSample(10000)}))}});
-  task.start();await flush();expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(30000);expect(api.submit).toHaveBeenCalledTimes(1);
+  const{task,api}=await setup({ocr:ocr(),overrides:{list:vi.fn(async()=>({activities:[activity],clock:clockSample(offset)})),detail:vi.fn(async()=>({activity,clock:clockSample(offset)}))}});
+  task.start();await flush();expect(api.captcha).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(9999);expect(api.captcha).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1);expect(api.captcha).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(30000);expect(api.submit).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(50);expect(api.submit).toHaveBeenCalledTimes(1);
 });
 it('only one captcha and recognition remain in flight across deadline ticks',async()=>{
   const pending=deferred<string>();const{task,api}=await setup({future:10000,ocr:{prepare:async()=>{},recognize:()=>pending.promise}});task.start();await flush();
   await vi.advanceTimersByTimeAsync(9999);expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).not.toHaveBeenCalled();pending.resolve('0733');await flush();
-  await vi.advanceTimersByTimeAsync(1);expect(api.submit).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('success');
+  await vi.advanceTimersByTimeAsync(51);expect(api.submit).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('success');
 });
 it('incomplete OCR refreshes immediately before opening and submits only the valid result',async()=>{
   const engine=ocr();engine.recognize.mockResolvedValueOnce('');const{task,api}=await setup({future:10000,ocr:engine});task.start();await flush();
   expect(api.captcha).toHaveBeenCalledTimes(2);expect(task.state.phase).toBe('prepared');expect(api.submit).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(10000);expect(task.state.phase).toBe('success');
+  await vi.advanceTimersByTimeAsync(10050);expect(task.state.phase).toBe('success');
 });
 
 it('expired early captcha is replaced immediately after a definitive rejection',async()=>{
   const submit=vi.fn().mockRejectedValueOnce(new ApiError('验证码错误','business')).mockResolvedValue(undefined);
-  const{task,api}=await setup({future:10000,ocr:ocr(),overrides:{submit}});task.start();await flush();await vi.advanceTimersByTimeAsync(10000);
+  const{task,api}=await setup({future:10000,ocr:ocr(),overrides:{submit}});task.start();await flush();await vi.advanceTimersByTimeAsync(10050);
   expect(api.captcha).toHaveBeenCalledTimes(2);expect(submit).toHaveBeenCalledTimes(2);expect(task.state.phase).toBe('success');
 });
 it('repeated OCR failures recover without a fixed delay or retry limit',async()=>{
@@ -62,7 +67,7 @@ it('captcha retry does not query capacity even if the list changes',async()=>{
 });
 it('failed prewarming retries engine preparation automatically when the task starts',async()=>{
   const engine=ocr();engine.prepare.mockRejectedValueOnce(new Error('assets'));const{task,api}=await setup({future:10000,ocr:engine});expect(task.state.ocrStatus).toBe('failed');
-  task.start();await flush();await vi.advanceTimersByTimeAsync(10000);expect(engine.prepare).toHaveBeenCalledTimes(2);expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);
+  task.start();await flush();await vi.advanceTimersByTimeAsync(10050);expect(engine.prepare).toHaveBeenCalledTimes(2);expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);
 });
 it('persistent engine initialization failure stops with diagnostics, never waiting for manual input',async()=>{
   const engine=ocr();engine.prepare.mockRejectedValue(new Error('assets'));const{task,api}=await setup({ocr:engine});task.start();await flush();
@@ -87,7 +92,7 @@ it.each([{reserved:true},{cancelled:true},{endsAt:NOW},{count:5000,capacity:5000
   const a={...await sample(),reserved:false,...variant};const{task,api}=await setup({overrides:{list:vi.fn(async()=>({activities:[a],clock:clockSample()}))}});task.start();await flush();expect(api.captcha).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
 });
 it('pending OCR at opening submits once as soon as it finishes',async()=>{
-  const pending=deferred<string>();const{task,api}=await setup({future:10000,ocr:{prepare:async()=>{},recognize:()=>pending.promise}});task.start();await flush();await vi.advanceTimersByTimeAsync(10000);expect(api.submit).not.toHaveBeenCalled();pending.resolve('1234');await flush();expect(api.submit).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('success');
+  const pending=deferred<string>();const{task,api}=await setup({future:10000,ocr:{prepare:async()=>{},recognize:()=>pending.promise}});task.start();await flush();await vi.advanceTimersByTimeAsync(10050);expect(api.submit).not.toHaveBeenCalled();pending.resolve('1234');await flush();expect(api.submit).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('success');
 });
 it('late CAPTCHA response after closing is ignored',async()=>{
   const pending=deferred<string>(),engine=ocr();const{task,api}=await setup({ocr:engine,overrides:{captcha:vi.fn(async()=>pending.promise)}});task.start();task.close();pending.resolve('old-image');await flush();expect(task.state.phase).toBe('closed');expect(engine.recognize).not.toHaveBeenCalled();expect(api.submit).not.toHaveBeenCalled();
@@ -127,19 +132,19 @@ it('unavailable activities do not prepare OCR resources',async()=>{
     expect(engine.prepare).not.toHaveBeenCalled();
   }
 });
-it('uses detail heartbeats every minute, a final calibration at T-40s, and one captcha at T-30s',async()=>{
+it('uses detail heartbeats every minute, a final time observation at T-40s, and one captcha at T-30s',async()=>{
   const engine=ocr(),{task,api}=await setup({future:180000,ocr:engine});task.start();
   await vi.advanceTimersByTimeAsync(60000);expect(api.detail).toHaveBeenCalledTimes(1);expect(api.captcha).not.toHaveBeenCalled();expect(engine.recognize).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(60000);expect(api.detail).toHaveBeenCalledTimes(2);
   await vi.advanceTimersByTimeAsync(20000);expect(api.detail).toHaveBeenCalledTimes(3);expect(api.captcha).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(10000);expect(api.captcha).toHaveBeenCalledTimes(1);expect(task.state.code).toBe('0733');
-  await vi.advanceTimersByTimeAsync(30000);expect(api.detail).toHaveBeenCalledTimes(3);expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(30050);expect(api.detail).toHaveBeenCalledTimes(3);expect(api.captcha).toHaveBeenCalledTimes(1);expect(api.submit).toHaveBeenCalledTimes(1);
 });
 it('401 retains task identity and can resume after normal login',async()=>{
   const engine=ocr();const{task,api,activity}=await setup({future:180000,ocr:engine});
   vi.mocked(api.detail).mockRejectedValueOnce(new ApiError('登录失效','session',401));task.start();await vi.advanceTimersByTimeAsync(60000);
   expect(task.state.phase).toBe('login-required');expect(task.state.activity?.id).toBe(activity.id);expect(task.state.code).toBe('');expect(api.submit).not.toHaveBeenCalled();
-  await task.resume();expect(task.state.phase).toBe('waiting');await vi.advanceTimersByTimeAsync(120000);expect(task.state.phase).toBe('success');
+  await task.resume();expect(task.state.phase).toBe('waiting');await vi.advanceTimersByTimeAsync(120050);expect(task.state.phase).toBe('success');
 });
 it('an in-flight detail heartbeat cannot delay the final captcha or replace its clock',async()=>{
   const {task,api,activity}=await setup({future:60000}),pending=deferred<Awaited<ReturnType<typeof api.detail>>>();
@@ -147,7 +152,7 @@ it('an in-flight detail heartbeat cannot delay the final captcha or replace its 
   await vi.advanceTimersByTimeAsync(20000);expect(api.detail).toHaveBeenCalledTimes(1);
   await vi.advanceTimersByTimeAsync(10000);expect(api.captcha).toHaveBeenCalledTimes(1);expect(task.state.phase).toBe('prepared');const clock=task.state.clock;
   pending.resolve({activity,clock:clockSample(60000)});await flush();expect(task.state.clock).toEqual(clock);
-  await vi.advanceTimersByTimeAsync(30000);expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(30050);expect(task.state.phase).toBe('success');expect(api.submit).toHaveBeenCalledTimes(1);
 });
 
 it('a session failure during submit resumes by verifying, never repeating the write',async()=>{

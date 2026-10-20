@@ -5,7 +5,3 @@ export interface ClockSample {
   rttMs:number;
   offset:number; // estimated server time minus local time
 }
-export const MAX_CLOCK_RTT_MS=2000;
-export function serverNow(sample?:ClockSample,now=Date.now()) {
-  return now+(sample?.offset??0);
-}

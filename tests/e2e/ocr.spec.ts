@@ -10,8 +10,8 @@ const stamp=(ms:number)=>new Date(ms+8*3600000).toISOString().slice(0,19).replac
 const fixtureStyle=`<style>
 body{font:16px system-ui;background:#edf5ef;margin:0;padding:20px}.activity-container{background:white;padding:20px;margin:0 0 18px;border-radius:14px}.activity-name{font-weight:600;margin:12px 0}.activity-text{font-size:14px;color:#67766c}.ydd-inline-flex{display:flex;justify-content:flex-end;align-items:center;margin:14px 0}.ydd-button-small{font:14px/18px system-ui;padding:4px 12px;border:1px solid #999;border-radius:20px;background:white}.button-warning{color:#e85e32;border-color:#e85e32}.activity-time{background:#e4f2e6;font-size:13px;padding:5px;text-align:center}
 </style>`;
-async function setup(page:Page, options:{expireSubmitOnce?:boolean;resumeStatus?:number;failResumeOnce?:boolean;bookedInitially?:boolean;pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
-  const initialTime=Date.now();
+async function setup(page:Page, options:{serverOffsetMs?:number;expireSubmitOnce?:boolean;resumeStatus?:number;failResumeOnce?:boolean;bookedInitially?:boolean;pair?:boolean;unlabelled?:boolean;unknownPrimary?:boolean;declinePair?:boolean;expireBackupOnce?:boolean;allFull?:boolean;expireProbeOnce?:boolean;notOpenOnce?:boolean;future?:boolean;blocked?:boolean;rejectCode?:boolean|'three';fullOnRejection?:boolean}={}) {
+  const initialTime=await page.evaluate(()=>Date.now());
   let resumeFailures=0,expiredWrite=false;
   let booked=Boolean(options.bookedInitially),bookedId=raw.datas.hdlbList[0].WID,writes=0,captchaCalls=0,detailCalls=0,assetCalls=0;
   const targets:string[]=[];const events:string[]=[];
@@ -34,7 +34,7 @@ async function setup(page:Page, options:{expireSubmitOnce?:boolean;resumeStatus?
     const name=url.pathname.split('/').pop();
     if(!url.pathname.includes('/modules/hdyy/')) return route.fulfill({contentType:'text/html',body:html.replace('</body>',fixtureStyle+'</body>')});
     const now=await page.evaluate(()=>Date.now()),data=structuredClone(raw);
-    data.datas.xtdqsj=stamp(now); data.datas.hdlbList[0].YYKSSJ=stamp(initialTime+(options.future?3600000:-3600000)); data.datas.hdlbList[0].YYJSSJ=stamp(now+7200000); data.datas.xsxxList=[];
+    data.datas.xtdqsj=stamp(now+(options.serverOffsetMs??0)); data.datas.hdlbList[0].YYKSSJ=stamp(initialTime+(options.future?3600000:-3600000)); data.datas.hdlbList[0].YYJSSJ=stamp(now+7200000); data.datas.xsxxList=[];
     data.datas.hdrsList.find((row:{HD_WID:string})=>row.HD_WID===data.datas.hdlbList[0].WID)!.YYRS=full?Number(data.datas.hdlbList[0].HDZRS):149;
     let result;
     if(options.pair){const first=data.datas.hdlbList[0];first.JZMC=options.unlabelled?'【艺术】同一讲座':'【线上】【艺术】同一讲座';first.JZDD='腾讯会议';const second={...first,WID:'offline-fixture',JZMC:options.unlabelled?'【艺术】同一讲座':'【线下】【艺术】同一讲座',JZDD:'九龙湖报告厅'};data.datas.hdlbList=[first,second];data.datas.hdrsList=[{HD_WID:first.WID,YYRS:0},{HD_WID:second.WID,YYRS:0}];}
@@ -269,12 +269,26 @@ test('single candidate has the same row-based progress and no duplicate status o
   await expect(progress(page)).toHaveText('等待开放');await expect(page.locator('#status')).toBeHidden();await expect(page.locator('#failure, #preparation, #labels, select')).toHaveCount(0);await page.clock.fastForward(30000);await expect(progress(page)).toHaveText('预约成功');expect(state.writes()).toBe(1);
   const aligned=await page.locator('.actions').evaluate(el=>{const a=el.getBoundingClientRect(),exportButton=el.querySelector('#export')!.getBoundingClientRect(),close=el.querySelector('#close')!.getBoundingClientRect();return Math.abs(exportButton.left-a.left)<1&&Math.abs(close.right-a.right)<1;});expect(aligned).toBe(true);
 });
-test('final detail calibration precedes captcha preparation and critical-stage requests remain serial',async({page})=>{
+test('final detail time observation precedes captcha preparation and critical-stage requests remain serial',async({page})=>{
   await page.clock.install();const state=await setup(page,{future:true});await openHelper(page);await page.locator('#start').click();
   await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
   await page.clock.fastForward(3560500);await expect.poll(state.detailCalls).toBe(1);expect(state.captchaCalls()).toBe(0);
   await page.clock.fastForward(10000);await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','prepared',{timeout:20000});
   await page.clock.fastForward(1000);expect(state.writes()).toBe(0);expect(state.detailCalls()).toBe(1);
   await page.clock.fastForward(30000);await expect(progress(page)).toContainText('预约成功');
+  expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);expect(state.detailCalls()).toBe(1);expect(state.failures).toEqual([]);
+});
+
+for(const offset of [-10000,10000])test(`server offset ${offset} cannot affect local T+50ms submission`,async({page})=>{
+  await page.clock.install({time:new Date('2026-10-20T10:00:00+08:00')});
+  await page.clock.pauseAt(new Date('2026-10-20T10:00:01+08:00'));
+  const state=await setup(page,{future:true,serverOffsetMs:offset});await openHelper(page);await page.locator('#start').click();
+  await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-ocr','ready',{timeout:20000});
+  await page.clock.fastForward(3560000);await expect.poll(state.detailCalls).toBe(1);expect(state.captchaCalls()).toBe(0);
+  await page.clock.runFor(9999);expect(state.captchaCalls()).toBe(0);
+  await page.clock.runFor(1);await expect(page.locator('#seu-lecture-helper-dialog')).toHaveAttribute('data-phase','prepared',{timeout:20000});
+  await page.clock.runFor(30000);expect(state.writes()).toBe(0);
+  await page.clock.runFor(49);expect(state.writes()).toBe(0);
+  await page.clock.runFor(1);await expect(progress(page)).toContainText('预约成功');
   expect(state.writes()).toBe(1);expect(state.captchaCalls()).toBe(1);expect(state.detailCalls()).toBe(1);expect(state.failures).toEqual([]);
 });
