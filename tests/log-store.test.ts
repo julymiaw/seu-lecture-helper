@@ -63,7 +63,7 @@ it('exports a warning instead of failing when only structurally corrupted histor
   const report=await new LogStore(f.open).export();expect(report.runs).toEqual([]);expect(report.storageWarning).toBeTruthy();
 });
 it('keeps credentials and the known captcha out of real API-to-diagnostics JSON export',async()=>{
-  const f=fixture();vi.stubGlobal('caches',{open:f.open});const {Diagnostics}=await import('../src/diagnostics'),{Api}=await import('../src/api'),{logStore}=await import('../src/log-store');
+  const f=fixture();vi.stubGlobal('caches',{open:f.open});vi.resetModules();const {Diagnostics}=await import('../src/diagnostics'),{Api}=await import('../src/api'),{logStore}=await import('../src/log-store');
   for(const msg of ['验证码错误 code=0733abc','authorization: Bearer SECRET_AUTH','{"token":"SECRET_TOKEN","password":"SECRET_PASSWORD"}']){
     const api=new Api(vi.fn(async()=>new Response(JSON.stringify({code:'token=SECRET_CODE',datas:null,msg}))));
     await new Diagnostics().measure('预约提交',()=>api.submit('id','0733')).catch(()=>{});
