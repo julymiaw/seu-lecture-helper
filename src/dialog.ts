@@ -48,6 +48,7 @@ dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overfl
 dialog::backdrop{background:#10251c80}
 h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}
 p{margin:10px 0 0;font-size:13px;line-height:1.5}
+.notice{color:#a23b2a;font-weight:600}
 #pair-question{font-size:14px;color:#64776a;margin:0}
 #candidates{margin-bottom:14px}
 #candidates[data-paired=true]{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px}
@@ -85,6 +86,7 @@ button:disabled{opacity:.5;cursor:default}
     <ol aria-label="候选场次" aria-live="polite"></ol>
   </section>
   <div class="overview"><span class="clock" aria-label="距离预约开放">--:--:--</span></div>
+  <p class="notice">本项目已停止维护。2026-11-02 研究生教务老师通知：严禁使用脚本预约素养讲座，违者将限制预约权限并依规处置。请勿再使用本脚本预约。</p>
   <p id="status" role="status" aria-live="polite"></p>
   <div class="actions">
     <button type="button" id="export">导出日志</button>

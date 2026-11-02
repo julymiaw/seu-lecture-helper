@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SEU 研究生讲座预约助手
 // @namespace    seu-lecture-helper
-// @version      1.0.0
-// @description  提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
+// @version      1.0.1
+// @description  【已停止维护】学校已通知严禁脚本预约，请勿再用于抢约；提前取图与本地 OCR 自动预约、线上线下串行候选、会话恢复与结果核验
 // @match        https://ehall.seu.edu.cn/gsapp/sys/yddjzxxtjappseu/*
 // @noframes
 // @run-at       document-idle
@@ -175,7 +175,7 @@ SOFTWARE.
   };
 
   // package.json
-  var version = "1.0.0";
+  var version = "1.0.1";
 
   // src/log-store.ts
   var LOG_CACHE = "seu-lecture-diagnostics-v1";
@@ -922,6 +922,7 @@ dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100dvh - 32px);overfl
 dialog::backdrop{background:#10251c80}
 h2{font-size:18px;line-height:1.5;margin:0 0 18px;overflow-wrap:anywhere}
 p{margin:10px 0 0;font-size:13px;line-height:1.5}
+.notice{color:#a23b2a;font-weight:600}
 #pair-question{font-size:14px;color:#64776a;margin:0}
 #candidates{margin-bottom:14px}
 #candidates[data-paired=true]{display:grid;grid-template-columns:210px 1fr;align-items:center;gap:12px}
@@ -959,6 +960,7 @@ button:disabled{opacity:.5;cursor:default}
     <ol aria-label="\u5019\u9009\u573A\u6B21" aria-live="polite"></ol>
   </section>
   <div class="overview"><span class="clock" aria-label="\u8DDD\u79BB\u9884\u7EA6\u5F00\u653E">--:--:--</span></div>
+  <p class="notice">\u672C\u9879\u76EE\u5DF2\u505C\u6B62\u7EF4\u62A4\u30022026-11-02 \u7814\u7A76\u751F\u6559\u52A1\u8001\u5E08\u901A\u77E5\uFF1A\u4E25\u7981\u4F7F\u7528\u811A\u672C\u9884\u7EA6\u7D20\u517B\u8BB2\u5EA7\uFF0C\u8FDD\u8005\u5C06\u9650\u5236\u9884\u7EA6\u6743\u9650\u5E76\u4F9D\u89C4\u5904\u7F6E\u3002\u8BF7\u52FF\u518D\u4F7F\u7528\u672C\u811A\u672C\u9884\u7EA6\u3002</p>
   <p id="status" role="status" aria-live="polite"></p>
   <div class="actions">
     <button type="button" id="export">\u5BFC\u51FA\u65E5\u5FD7</button>
